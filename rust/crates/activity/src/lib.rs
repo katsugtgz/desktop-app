@@ -205,8 +205,9 @@ impl ActivityStore {
         consumer_id: &str,
         args: &QueryArgs,
     ) -> sqlx::Result<Vec<ActivityEntry>> {
-        let mut qb: QueryBuilder<Sqlite> =
-            QueryBuilder::new("SELECT resourceId, manifestURL, type, extraData, createdAt FROM activity");
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+            "SELECT resourceId, manifestURL, type, extraData, createdAt FROM activity",
+        );
         build_where(&mut qb, consumer_id, args);
         // Only 'createdAt' is orderable in TS; anything else falls back to it.
         qb.push(" ORDER BY createdAt");
@@ -333,7 +334,13 @@ mod tests {
         assert!(!id.activity_entry_id.is_empty());
 
         let got = store
-            .query("app1", &QueryArgs { limit: 10, ..Default::default() })
+            .query(
+                "app1",
+                &QueryArgs {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
@@ -360,12 +367,18 @@ mod tests {
         let got = store
             .query(
                 "app1",
-                &QueryArgs { limit: 2, ascending: true, ..Default::default() },
+                &QueryArgs {
+                    limit: 2,
+                    ascending: true,
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
         assert_eq!(
-            got.iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(),
+            got.iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r1", "r2"]
         );
     }
@@ -379,7 +392,10 @@ mod tests {
 
         let where_types = QueryArgs {
             limit: 10,
-            where_: QueryArgsScope { types: Some(vec!["open".into()]), ..Default::default() },
+            where_: QueryArgsScope {
+                types: Some(vec!["open".into()]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let got = store.query("app1", &where_types).await.unwrap();
@@ -388,7 +404,10 @@ mod tests {
 
         let where_not = QueryArgs {
             limit: 10,
-            where_not: QueryArgsScope { types: Some(vec!["open".into()]), ..Default::default() },
+            where_not: QueryArgsScope {
+                types: Some(vec!["open".into()]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let got = store.query("app1", &where_not).await.unwrap();
@@ -396,14 +415,27 @@ mod tests {
         assert_eq!(got[0].resource_id, "r2");
 
         // global: true sees app2's rows too.
-        let global = QueryArgs { limit: 10, global: true, ..Default::default() };
+        let global = QueryArgs {
+            limit: 10,
+            global: true,
+            ..Default::default()
+        };
         let got = store.query("app1", &global).await.unwrap();
         assert_eq!(got.len(), 3);
 
         // limitByDate keeps only entries at/after the timestamp.
-        let by_date = QueryArgs { limit: 10, limit_by_date: Some(150), ..Default::default() };
+        let by_date = QueryArgs {
+            limit: 10,
+            limit_by_date: Some(150),
+            ..Default::default()
+        };
         let got = store.query("app1", &by_date).await.unwrap();
-        assert_eq!(got.iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(), vec!["r2"]);
+        assert_eq!(
+            got.iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r2"]
+        );
     }
 
     #[tokio::test]
@@ -412,12 +444,24 @@ mod tests {
         store.push("a", entry("r1", "", 100)).await.unwrap();
 
         let got = store
-            .query("b", &QueryArgs { limit: 10, ..Default::default() })
+            .query(
+                "b",
+                &QueryArgs {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert!(got.is_empty());
         let got = store
-            .query("a", &QueryArgs { limit: 10, ..Default::default() })
+            .query(
+                "a",
+                &QueryArgs {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
@@ -426,13 +470,22 @@ mod tests {
     #[tokio::test]
     async fn clean_old_activity_deletes_older_than_cutoff() {
         let store = ActivityStore::in_memory().await.unwrap();
-        store.push("app1", entry("r1", "", now_ms() - 10_000)).await.unwrap();
+        store
+            .push("app1", entry("r1", "", now_ms() - 10_000))
+            .await
+            .unwrap();
         store.push("app1", entry("r2", "", now_ms())).await.unwrap();
 
         let deleted = store.clean_old_activity(5_000).await.unwrap();
         assert_eq!(deleted, 1);
         let got = store
-            .query("app1", &QueryArgs { limit: 10, ..Default::default() })
+            .query(
+                "app1",
+                &QueryArgs {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(got.len(), 1);

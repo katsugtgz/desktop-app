@@ -128,10 +128,22 @@ pub fn runtime_versions(process_versions: &serde_json::Value) -> Vec<RuntimeVers
             .to_owned()
     };
     vec![
-        RuntimeVersion { label: "Electron", version: get("electron") },
-        RuntimeVersion { label: "Chrome", version: get("chrome") },
-        RuntimeVersion { label: "Node", version: get("node") },
-        RuntimeVersion { label: "v8", version: get("v8") },
+        RuntimeVersion {
+            label: "Electron",
+            version: get("electron"),
+        },
+        RuntimeVersion {
+            label: "Chrome",
+            version: get("chrome"),
+        },
+        RuntimeVersion {
+            label: "Node",
+            version: get("node"),
+        },
+        RuntimeVersion {
+            label: "v8",
+            version: get("v8"),
+        },
     ]
 }
 
@@ -197,7 +209,10 @@ mod tests {
         assert!(!s.beta_included_in_updates);
         // SET_APP_METADATA
         s.set_app_metadata("Station", "6.0.0");
-        assert_eq!((s.app_name.as_str(), s.app_version.as_str()), ("Station", "6.0.0"));
+        assert_eq!(
+            (s.app_name.as_str(), s.app_version.as_str()),
+            ("Station", "6.0.0")
+        );
     }
 
     #[test]
@@ -219,7 +234,10 @@ mod tests {
         assert!(should_close(CloseReason::Blur));
         assert!(should_close(CloseReason::EscapePressed));
         // only Escape maps from a keydown; other keys leave the window open
-        assert_eq!(CloseReason::from_key("Escape"), Some(CloseReason::EscapePressed));
+        assert_eq!(
+            CloseReason::from_key("Escape"),
+            Some(CloseReason::EscapePressed)
+        );
         assert_eq!(CloseReason::from_key("Enter"), None);
         assert_eq!(CloseReason::from_key("a"), None);
     }

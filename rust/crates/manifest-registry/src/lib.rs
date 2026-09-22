@@ -60,7 +60,12 @@ pub struct BxAppManifest {
         skip_serializing_if = "Option::is_none"
     )]
     pub recommended_position: Option<f64>,
-    #[serde(rename = "doNotList", default, with = "lenient_bool", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "doNotList",
+        default,
+        with = "lenient_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub do_not_list: Option<bool>,
 }
 
@@ -114,7 +119,11 @@ mod lenient_number_or_string {
         match Option::<V>::deserialize(d)? {
             None => Ok(None),
             Some(V::N(n)) => Ok(Some(n)),
-            Some(V::S(s)) => s.trim().parse::<f64>().map(Some).map_err(serde::de::Error::custom),
+            Some(V::S(s)) => s
+                .trim()
+                .parse::<f64>()
+                .map(Some)
+                .map_err(serde::de::Error::custom),
         }
     }
 
@@ -169,7 +178,8 @@ pub enum Preset {
 }
 
 /// The bundled application definitions (`packages/app/manifests/definitions`).
-static DEFINITIONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../packages/app/manifests/definitions");
+static DEFINITIONS: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../../packages/app/manifests/definitions");
 
 /// A manifest with its registry id and resolved icon URL attached
 /// (TS `Manifest = Omit<BxAppManifest, 'icons'> & { id, icon }`).
@@ -236,7 +246,11 @@ pub fn get_all_application_ids() -> Vec<String> {
 pub fn get_application_by_id(id: &str) -> Option<Manifest> {
     let file = DEFINITIONS.get_file(format!("{id}.json"))?;
     let inner: BxAppManifest = serde_json::from_str(file.contents_utf8()?).ok()?;
-    Some(Manifest { inner, id: id.to_owned(), icon: String::new() })
+    Some(Manifest {
+        inner,
+        id: id.to_owned(),
+        icon: String::new(),
+    })
 }
 
 /// Port of `manifestToMinimalApplication`.
@@ -351,10 +365,15 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
         }
 
         buf.clear();
-        let score = Pattern::new(&query_lower, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy)
-            .score(nucleo_matcher::Utf32Str::new(&name, &mut buf), &mut matcher)
-            .map(|s| s as i64)
-            .unwrap_or(NO_WORD_HIT_SCORE);
+        let score = Pattern::new(
+            &query_lower,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        )
+        .score(nucleo_matcher::Utf32Str::new(&name, &mut buf), &mut matcher)
+        .map(|s| s as i64)
+        .unwrap_or(NO_WORD_HIT_SCORE);
         hits.push((hit, score, manifest_to_minimal_application(app)));
     }
     hits.sort_by(|a, b| {
@@ -488,7 +507,11 @@ impl PrivateStore {
                 Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
             }
         }
-        Ok(Self { path, data, highest_id })
+        Ok(Self {
+            path,
+            data,
+            highest_id,
+        })
     }
 
     /// Port of `saveNewApplication`: assigns the next id, persists, and
@@ -535,18 +558,16 @@ impl PrivateStore {
                     ..BxAppManifest::default()
                 },
                 id: r.id.to_string(),
-                icon: r
-                    .icons
-                    .first()
-                    .map(|i| i.src.clone())
-                    .unwrap_or_default(),
+                icon: r.icons.first().map(|i| i.src.clone()).unwrap_or_default(),
             })
             .collect()
     }
 
     /// Port of `getPrivateApplicationById`.
     pub fn get_private_application_by_id(&self, id: u64) -> Option<Manifest> {
-        self.get_private_manifests().into_iter().find(|m| m.id == id.to_string())
+        self.get_private_manifests()
+            .into_iter()
+            .find(|m| m.id == id.to_string())
     }
 
     fn persist(&self) -> std::io::Result<()> {
@@ -600,7 +621,8 @@ mod tests {
 
         let mut parsed = 0;
         for id in &ids {
-            let m = get_application_by_id(id).unwrap_or_else(|| panic!("failed to parse {id}.json"));
+            let m =
+                get_application_by_id(id).unwrap_or_else(|| panic!("failed to parse {id}.json"));
             assert_eq!(&m.id, id);
             parsed += 1;
         }

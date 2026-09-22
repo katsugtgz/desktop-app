@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use manifest_registry::{
-    get_presets, BxAppManifest, Manifest, NewPrivateApplication, PrivateStore, Preset,
+    get_presets, BxAppManifest, Manifest, NewPrivateApplication, Preset, PrivateStore,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +75,11 @@ pub struct InstallOptions {
 /// the three multi-instance configuration knobs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ApplicationConfigData {
-    #[serde(default, rename = "identityId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "identityId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub identity_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subdomain: Option<String>,
@@ -326,15 +330,20 @@ impl ApplicationService {
             .strip_prefix("station-manifest://")
             .map(|rest| rest.trim_end_matches('/'))
         {
-            let m = manifest_registry::get_application_by_id(id)
-                .or_else(|| id.parse::<u64>().ok().and_then(|n| self.private.get_private_application_by_id(n)));
+            let m = manifest_registry::get_application_by_id(id).or_else(|| {
+                id.parse::<u64>()
+                    .ok()
+                    .and_then(|n| self.private.get_private_application_by_id(n))
+            });
             if let Some(m) = m {
                 if manifest_registry::get_bx_app_manifest_url(&m.id) == manifest_url {
                     return Ok(m.inner);
                 }
             }
         }
-        Err(ApplicationError::ManifestNotAvailable(manifest_url.to_owned()))
+        Err(ApplicationError::ManifestNotAvailable(
+            manifest_url.to_owned(),
+        ))
     }
 
     /// Port of `installApplication` (lifecycle.ts): resolves the manifest,
@@ -357,12 +366,8 @@ impl ApplicationService {
         let config_data = config_data_for_presets(&manifest, &options.config_data);
 
         // getStartURL → createNewTab(applicationId, startURL, { home: true }).
-        let home_tab_url = start_url_for_install(
-            &manifest,
-            manifest_url,
-            &application_id,
-            &config_data,
-        );
+        let home_tab_url =
+            start_url_for_install(&manifest, manifest_url, &application_id, &config_data);
         if let Some(url) = home_tab_url.clone() {
             self.tabs.push(TabRecord {
                 tab_id: shortid(),
@@ -408,11 +413,11 @@ impl ApplicationService {
         // (`getFavoritesForApplication` filters by applicationId only;
         // `getTabFavoriteId(fav)` returns the always-present `favoriteId`,
         // so TS deletes them all, tab or no tab).
-        self.favorites.retain(|f| f.application_id != application_id);
+        self.favorites
+            .retain(|f| f.application_id != application_id);
 
         // closeAllTabsInApp + dropApplication.
-        self.tabs
-            .retain(|t| t.application_id != application_id);
+        self.tabs.retain(|t| t.application_id != application_id);
         self.installed.remove(application_id);
 
         // removeAppItem.
@@ -541,7 +546,10 @@ impl ApplicationService {
 
     /// Test helper: remaining favorite ids.
     pub fn favorites_for_test(&self) -> Vec<&str> {
-        self.favorites.iter().map(|f| f.favorite_id.as_str()).collect()
+        self.favorites
+            .iter()
+            .map(|f| f.favorite_id.as_str())
+            .collect()
     }
 }
 
@@ -562,8 +570,10 @@ fn config_data_for_presets(
         presets.contains(&Preset::GoogleAccount),
     ) {
         kept.identity_id = Some(id);
-    } else if let (Some(sub), true) = (config.subdomain.clone(), presets.contains(&Preset::Subdomain))
-    {
+    } else if let (Some(sub), true) = (
+        config.subdomain.clone(),
+        presets.contains(&Preset::Subdomain),
+    ) {
         kept.subdomain = Some(sub);
     } else if let (Some(url), true) = (
         config.custom_url.clone(),
@@ -603,7 +613,10 @@ pub(crate) fn start_url_for_install(
         return Some(url);
     }
     // `startUrl || getMultiInstanceConfiguratorURL(manifestURL, applicationId)`.
-    Some(get_multi_instance_configurator_url(manifest_url, application_id))
+    Some(get_multi_instance_configurator_url(
+        manifest_url,
+        application_id,
+    ))
 }
 
 /// Port of `getURLForPreset` for `URLType.START`.
@@ -612,7 +625,10 @@ fn get_url_for_preset(
     presets: &[Preset],
     config_data: &ApplicationConfigData,
 ) -> Option<String> {
-    if let (Some(_), true) = (&config_data.identity_id, presets.contains(&Preset::GoogleAccount)) {
+    if let (Some(_), true) = (
+        &config_data.identity_id,
+        presets.contains(&Preset::GoogleAccount),
+    ) {
         // The TS path re-selects full config data and renders
         // `start_url_tpl` with it; identity-provided fields live outside
         // this crate (user-identities), so at install time the stored
@@ -620,12 +636,18 @@ fn get_url_for_preset(
         return Some(format_start_url(manifest, config_data));
     }
     if let (Some(_), true) = (&config_data.subdomain, presets.contains(&Preset::Subdomain)) {
-        return Some(format_start_url(manifest, &ApplicationConfigData {
-            subdomain: config_data.subdomain.clone(),
-            ..ApplicationConfigData::default()
-        }));
+        return Some(format_start_url(
+            manifest,
+            &ApplicationConfigData {
+                subdomain: config_data.subdomain.clone(),
+                ..ApplicationConfigData::default()
+            },
+        ));
     }
-    if let (Some(url), true) = (&config_data.custom_url, presets.contains(&Preset::OnPremise)) {
+    if let (Some(url), true) = (
+        &config_data.custom_url,
+        presets.contains(&Preset::OnPremise),
+    ) {
         return Some(url.clone());
     }
     None
@@ -687,7 +709,10 @@ fn normalize_manifest_url(url: &str) -> String {
         return trimmed.to_owned();
     };
     let lower_scheme = scheme.to_ascii_lowercase();
-    let special = matches!(lower_scheme.as_str(), "http" | "https" | "ws" | "wss" | "ftp" | "file");
+    let special = matches!(
+        lower_scheme.as_str(),
+        "http" | "https" | "ws" | "wss" | "ftp" | "file"
+    );
     let has_authority = rest.starts_with("//");
     if !has_authority {
         // Opaque path (never produced by the manifest URLs in play).
@@ -743,9 +768,15 @@ mod tests {
             .install("station-manifest://157", &InstallOptions::default())
             .unwrap();
         assert_eq!(ret.manifest.name.as_deref(), Some("Todoist"));
-        assert_eq!(ret.manifest.start_url.as_deref().unwrap(), "https://app.todoist.com/auth/login");
+        assert_eq!(
+            ret.manifest.start_url.as_deref().unwrap(),
+            "https://app.todoist.com/auth/login"
+        );
 
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         assert_eq!(
             app.home_tab_url.as_deref(),
             Some("https://app.todoist.com/auth/login")
@@ -761,10 +792,11 @@ mod tests {
     fn golden_install_no_dock_manifest_stays_off_dock() {
         let mut apps = ApplicationService::for_tests("install-nodock");
         // 415 Boomerang: bx_no_dock, no start_url → no home tab either.
-        let ret = apps
-            .install(BOOMERANG, &InstallOptions::default())
+        let ret = apps.install(BOOMERANG, &InstallOptions::default()).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
             .unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
         assert!(!app.in_dock);
         assert!(apps.dock().is_empty());
         assert_eq!(app.home_tab_url, None);
@@ -787,7 +819,10 @@ mod tests {
         let ret = apps
             .install("station-manifest://1000001", &InstallOptions::default())
             .unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         assert_eq!(app.home_tab_url, None);
         assert!(apps.tabs().is_empty());
     }
@@ -802,7 +837,10 @@ mod tests {
             err,
             ApplicationError::ManifestNotAvailable("station-manifest://999999".to_owned())
         );
-        assert_eq!(err.to_string(), "Could not get the manifest station-manifest://999999");
+        assert_eq!(
+            err.to_string(),
+            "Could not get the manifest station-manifest://999999"
+        );
     }
 
     #[test]
@@ -818,7 +856,10 @@ mod tests {
             install_context: Some(InstallContext::appstore("onboardee/3")),
         };
         let ret = apps.install(GMAIL, &options).unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         // Only the google-account field is kept (first matching preset wins).
         assert_eq!(app.config_data.identity_id.as_deref(), Some("identity/7"));
         assert_eq!(app.config_data.subdomain, None);
@@ -848,7 +889,10 @@ mod tests {
             install_context: None,
         };
         let ret = apps.install("station-manifest://119", &options).unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         assert_eq!(
             app.home_tab_url.as_deref(),
             Some("https://acme.signin.aws.amazon.com/console")
@@ -868,7 +912,10 @@ mod tests {
             install_context: None,
         };
         let ret = apps.install("station-manifest://123", &options).unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         assert_eq!(
             app.home_tab_url.as_deref(),
             Some("https://gitlab.corp.acme.dev")
@@ -880,7 +927,10 @@ mod tests {
         let mut apps = ApplicationService::for_tests("install-configurator");
         // Gmail with no config data: startUrl null → configurator URL.
         let ret = apps.install(GMAIL, &InstallOptions::default()).unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         let expected = format!(
             "station://multi-instance-configurator/?manifestURL=station-manifest%3A%2F%2F14&applicationId={}",
             ret.application_id
@@ -893,7 +943,10 @@ mod tests {
         let mut apps = ApplicationService::for_tests("install-appstore");
         // 1 App Store: start_url "station://appstore/" and bx_no_dock.
         let ret = apps.install(APPSTORE, &InstallOptions::default()).unwrap();
-        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
         assert_eq!(app.home_tab_url.as_deref(), Some("station://appstore/"));
         assert_eq!(apps.tabs().len(), 1);
         assert!(!app.in_dock); // App Store is bx_no_dock
@@ -917,7 +970,9 @@ mod tests {
     fn golden_uninstall_cleans_tabs_dock_links_and_tab_favorites() {
         let mut apps = ApplicationService::for_tests("uninstall");
         let gmail = apps.install(GMAIL, &InstallOptions::default()).unwrap();
-        let other = apps.install("station-manifest://157", &InstallOptions::default()).unwrap();
+        let other = apps
+            .install("station-manifest://157", &InstallOptions::default())
+            .unwrap();
 
         // Two favorites of the app (TS deletes every app favorite —
         // getTabFavoriteId always yields favoriteId), one on a foreign app.
@@ -938,7 +993,9 @@ mod tests {
 
         apps.uninstall(&gmail.application_id).unwrap();
 
-        assert!(!apps.installed_applications().contains_key(&gmail.application_id));
+        assert!(!apps
+            .installed_applications()
+            .contains_key(&gmail.application_id));
         assert!(apps
             .tabs()
             .iter()
@@ -1029,7 +1086,10 @@ mod tests {
             .install("station-manifest://1000001", &InstallOptions::default())
             .unwrap();
         assert_eq!(
-            apps.installed_applications().get(&ret.application_id).unwrap().home_tab_url,
+            apps.installed_applications()
+                .get(&ret.application_id)
+                .unwrap()
+                .home_tab_url,
             Some("https://acme.test/login".to_owned())
         );
 
@@ -1080,11 +1140,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn url_normalization_matches_new_url_to_string() {
-        assert_eq!(normalize_manifest_url("STATION-MANIFEST://14"), "station-manifest://14");
-        assert_eq!(normalize_manifest_url("https://Example.COM"), "https://example.com/");
+        assert_eq!(
+            normalize_manifest_url("STATION-MANIFEST://14"),
+            "station-manifest://14"
+        );
+        assert_eq!(
+            normalize_manifest_url("https://Example.COM"),
+            "https://example.com/"
+        );
         assert_eq!(
             normalize_manifest_url("https://example.com:443/a?b=c"),
             "https://example.com/a?b=c"
@@ -1123,7 +1188,10 @@ mod tests {
         };
         let json = serde_json::to_value(&ctx).unwrap();
         assert_eq!(json["platform"], serde_json::json!("appstore"));
-        assert_eq!(json["onboardeeApplicationAssignmentId"], serde_json::json!("oa/1"));
+        assert_eq!(
+            json["onboardeeApplicationAssignmentId"],
+            serde_json::json!("oa/1")
+        );
         assert_eq!(serde_json::from_value::<InstallContext>(json).unwrap(), ctx);
     }
 }

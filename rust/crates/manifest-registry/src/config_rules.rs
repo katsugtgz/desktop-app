@@ -81,7 +81,9 @@ fn is_configuration_required_for_google_account(
     application: &ApplicationConfigState,
     presets: &[Preset],
 ) -> Option<bool> {
-    presets.contains(&Preset::GoogleAccount).then(|| !application.identity_id_truthy())
+    presets
+        .contains(&Preset::GoogleAccount)
+        .then(|| !application.identity_id_truthy())
 }
 
 fn is_configuration_required_for_subdomain(

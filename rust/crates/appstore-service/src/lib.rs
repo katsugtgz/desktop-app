@@ -19,7 +19,7 @@ pub mod app_request;
 pub mod write_commands;
 
 pub use app_request::{
-    submit_app_request, AppRequest, AppRequestAction, AppRequestData, ApiResponse, Steps,
+    submit_app_request, ApiResponse, AppRequest, AppRequestAction, AppRequestData, Steps,
     Visibility,
 };
 pub use write_commands::{
@@ -265,7 +265,7 @@ mod tests {
         // Spot-check a known bucket.
         let storage = map.get("Storage & File-sharing").unwrap();
         assert!(minimal_ids(storage).contains(&"16")); // Google Drive
-        // Minimal projection carries the TS field set.
+                                                       // Minimal projection carries the TS field set.
         let drive = storage.iter().find(|a| a.id == "16").unwrap();
         assert_eq!(drive.bx_app_manifest_url, "station-manifest://16");
         assert!(!drive.is_chrome_extension);
@@ -292,7 +292,10 @@ mod tests {
         assert!(!minimal_ids(&popular.noteworthy).contains(&"157"));
 
         // Categories: no new category introduced (Developer Tools exists).
-        assert_eq!(get_all_categories(&private).len(), get_all_categories(&[]).len());
+        assert_eq!(
+            get_all_categories(&private).len(),
+            get_all_categories(&[]).len()
+        );
 
         // By-category: private app lands in its bucket.
         let grouped = get_applications_by_category(&private);
