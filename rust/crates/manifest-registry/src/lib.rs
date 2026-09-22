@@ -11,6 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod config_rules;
+
+pub use config_rules::{
+    application_label, get_presets, is_configuration_required, is_multi_instance_configurator,
+    ApplicationConfigState, ConfigRulesError,
+};
+
 use include_dir::{include_dir, Dir};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
