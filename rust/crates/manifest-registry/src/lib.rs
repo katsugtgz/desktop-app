@@ -313,7 +313,7 @@ const NO_WORD_HIT_SCORE: i64 = -1;
 /// 1. query-word prefix match ("git" → "GitHub"),
 /// 2. query-word substring match ("calendar" → "Google Calendar"),
 /// 3. nucleo fuzzy score (descending),
-/// then name, then id, for determinism.
+///    then name, then id, for determinism.
 pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
     let apps = list_all_applications(private);
     // Empty pattern: Fuse.search('') returns no results; match that.

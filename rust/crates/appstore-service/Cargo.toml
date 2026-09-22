@@ -1,0 +1,9 @@
+[package]
+name = "appstore-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+manifest-registry = { path = "../manifest-registry" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
