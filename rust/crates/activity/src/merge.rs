@@ -17,7 +17,10 @@ pub struct GlobalActivityEntry {
 
 impl GlobalActivityEntry {
     pub fn new(entry: ActivityEntry, plugin_id: impl Into<String>) -> Self {
-        GlobalActivityEntry { entry, plugin_id: plugin_id.into() }
+        GlobalActivityEntry {
+            entry,
+            plugin_id: plugin_id.into(),
+        }
     }
 }
 
@@ -31,11 +34,23 @@ pub fn activity_filter(
     let keep = |g: &GlobalActivityEntry| {
         let e = &g.entry;
         (args.global || g.plugin_id == plugin_id)
-            && scope_keeps(&args.where_.resource_ids, Some(e.resource_id.as_str()), true)
+            && scope_keeps(
+                &args.where_.resource_ids,
+                Some(e.resource_id.as_str()),
+                true,
+            )
             && scope_keeps(&args.where_.manifest_urls, e.manifest_url.as_deref(), true)
             && scope_keeps(&args.where_.types, Some(e.type_.as_str()), true)
-            && scope_keeps(&args.where_not.resource_ids, Some(e.resource_id.as_str()), false)
-            && scope_keeps(&args.where_not.manifest_urls, e.manifest_url.as_deref(), false)
+            && scope_keeps(
+                &args.where_not.resource_ids,
+                Some(e.resource_id.as_str()),
+                false,
+            )
+            && scope_keeps(
+                &args.where_not.manifest_urls,
+                e.manifest_url.as_deref(),
+                false,
+            )
             && scope_keeps(&args.where_not.types, Some(e.type_.as_str()), false)
     };
     entries.into_iter().filter(|g| keep(g)).collect()
@@ -69,7 +84,11 @@ impl OrderedActivity {
 
     /// `OrderedActivity::new` with an explicit sort direction.
     pub fn with_order(limit: i32, ascending: bool) -> Self {
-        OrderedActivity { entries: Vec::new(), limit: limit.max(0) as usize, ascending }
+        OrderedActivity {
+            entries: Vec::new(),
+            limit: limit.max(0) as usize,
+            ascending,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -149,7 +168,11 @@ mod tests {
     }
 
     fn args(limit: i32, ascending: bool) -> QueryArgs {
-        QueryArgs { limit, ascending, ..Default::default() }
+        QueryArgs {
+            limit,
+            ascending,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -160,20 +183,33 @@ mod tests {
         other.entry.type_ = "close".into();
 
         // Plugin isolation: only the querying consumer's entries.
-        let a = QueryArgs { limit: 10, ..Default::default() };
+        let a = QueryArgs {
+            limit: 10,
+            ..Default::default()
+        };
         let got = activity_filter(vec![e.clone(), other.clone()], "app1", &a);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].entry.resource_id, "r1");
 
         // global: true keeps both.
-        let a = QueryArgs { limit: 10, global: true, ..Default::default() };
-        assert_eq!(activity_filter(vec![e.clone(), other.clone()], "app1", &a).len(), 2);
+        let a = QueryArgs {
+            limit: 10,
+            global: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            activity_filter(vec![e.clone(), other.clone()], "app1", &a).len(),
+            2
+        );
 
         // where types
         let a = QueryArgs {
             limit: 10,
             global: true,
-            where_: QueryArgsScope { types: Some(vec!["close".into()]), ..Default::default() },
+            where_: QueryArgsScope {
+                types: Some(vec!["close".into()]),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let got = activity_filter(vec![e.clone(), other.clone()], "app1", &a);
@@ -197,21 +233,35 @@ mod tests {
         let mut ordered = OrderedActivity::new(2);
         ordered.fold(vec![global("r1", 100, "a"), global("r2", 200, "a")]);
         assert_eq!(
-            ordered.clone().into_entries().iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(),
+            ordered
+                .clone()
+                .into_entries()
+                .iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r2", "r1"]
         );
 
         // New oldest entry falls out at limit 2.
         ordered.fold(vec![global("r3", 50, "a")]);
         assert_eq!(
-            ordered.clone().into_entries().iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(),
+            ordered
+                .clone()
+                .into_entries()
+                .iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r2", "r1"]
         );
 
         // New newest entry takes the head.
         ordered.fold(vec![global("r4", 300, "a")]);
         assert_eq!(
-            ordered.into_entries().iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(),
+            ordered
+                .into_entries()
+                .iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r4", "r2"]
         );
     }
@@ -223,13 +273,23 @@ mod tests {
         assert_eq!(ordered.len(), 2);
 
         // Live batch from another plugin filtered out.
-        ordered.fold(activity_filter(vec![global("r9", 900, "app2")], "app1", &args(3, false)));
+        ordered.fold(activity_filter(
+            vec![global("r9", 900, "app2")],
+            "app1",
+            &args(3, false),
+        ));
         assert_eq!(ordered.len(), 2);
 
-        ordered.fold(activity_filter(vec![global("r3", 300, "app1")], "app1", &args(3, false)));
+        ordered.fold(activity_filter(
+            vec![global("r3", 300, "app1")],
+            "app1",
+            &args(3, false),
+        ));
         let got = ordered.into_entries();
         assert_eq!(
-            got.iter().map(|e| e.resource_id.as_str()).collect::<Vec<_>>(),
+            got.iter()
+                .map(|e| e.resource_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["r3", "r2", "r1"]
         );
     }

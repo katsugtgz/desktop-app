@@ -105,12 +105,9 @@ fn golden_google_account_requires_identity() {
     // no identity picked yet -> configuration required
     assert!(is_configuration_required(&manifest, &state(None, None, None), "").unwrap());
     // identity set -> configured
-    assert!(!is_configuration_required(
-        &manifest,
-        &state(Some("auth0|123"), None, None),
-        ""
-    )
-    .unwrap());
+    assert!(
+        !is_configuration_required(&manifest, &state(Some("auth0|123"), None, None), "").unwrap()
+    );
 }
 
 #[test]
@@ -119,7 +116,9 @@ fn golden_subdomain_only_requires_subdomain() {
     assert!(is_configuration_required(&manifest, &state(None, None, None), "").unwrap());
     assert!(!is_configuration_required(&manifest, &state(None, Some("acme"), None), "").unwrap());
     // a custom URL does NOT satisfy a subdomain-only app
-    assert!(is_configuration_required(&manifest, &state(None, None, Some("https://x")), "").unwrap());
+    assert!(
+        is_configuration_required(&manifest, &state(None, None, Some("https://x")), "").unwrap()
+    );
 }
 
 #[test]
@@ -130,7 +129,12 @@ fn golden_subdomain_onpremise_accepts_either() {
     // subdomain -> configured
     assert!(!is_configuration_required(&manifest, &state(None, Some("acme"), None), "").unwrap());
     // custom URL alone -> configured
-    assert!(!is_configuration_required(&manifest, &state(None, None, Some("https://git.local")), "").unwrap());
+    assert!(!is_configuration_required(
+        &manifest,
+        &state(None, None, Some("https://git.local")),
+        ""
+    )
+    .unwrap());
     // both -> configured
     assert!(!is_configuration_required(
         &manifest,
@@ -145,9 +149,17 @@ fn golden_onpremise_only_uses_custom_url_or_configurator_home_tab() {
     let manifest = gitlab().inner;
     // no custom URL and home tab is a real URL (user already navigated
     // past the configurator) -> configured, not required
-    assert!(!is_configuration_required(&manifest, &state(None, None, None), "https://gitlab.com").unwrap());
+    assert!(
+        !is_configuration_required(&manifest, &state(None, None, None), "https://gitlab.com")
+            .unwrap()
+    );
     // custom URL -> configured
-    assert!(!is_configuration_required(&manifest, &state(None, None, Some("https://git.local")), "").unwrap());
+    assert!(!is_configuration_required(
+        &manifest,
+        &state(None, None, Some("https://git.local")),
+        ""
+    )
+    .unwrap());
     // no custom URL and home tab still on the multi-instance configurator
     // (onboarding in progress) -> configuration still required
     assert!(is_configuration_required(
@@ -173,9 +185,7 @@ fn golden_unknown_preset_combination_errors() {
     // definition uses it; the Rust `Preset` enum rejects unknown
     // variants at parse time — an even earlier failure than the TS
     // throw — so that is the golden here.
-    assert!(
-        serde_json::from_str::<manifest_registry::Preset>("\"undefined\"").is_err()
-    );
+    assert!(serde_json::from_str::<manifest_registry::Preset>("\"undefined\"").is_err());
     // and a Preset-only slice no handler covers is unreachable through
     // typed manifests; the runtime guard is exercised via the error type
     // contract:
@@ -201,8 +211,12 @@ fn golden_google_account_label_uses_identity_email() {
     let manifest = gmail().inner;
     let identity_email = Some("user@gmail.com".to_owned());
     assert_eq!(
-        application_label(&manifest, &state(Some("auth0|1"), None, None), identity_email.as_deref())
-            .unwrap(),
+        application_label(
+            &manifest,
+            &state(Some("auth0|1"), None, None),
+            identity_email.as_deref()
+        )
+        .unwrap(),
         "Gmail - user@gmail.com"
     );
 }
@@ -258,7 +272,12 @@ fn golden_onpremise_only_has_no_instance_label() {
     // Gitlab (on-premise only, no instance_label_tpl): plain name.
     let manifest = gitlab().inner;
     assert_eq!(
-        application_label(&manifest, &state(None, None, Some("https://git.local")), None).unwrap(),
+        application_label(
+            &manifest,
+            &state(None, None, Some("https://git.local")),
+            None
+        )
+        .unwrap(),
         "Gitlab - Gitlab"
     );
 }
@@ -269,13 +288,21 @@ fn golden_subdomain_onpremise_label_prefers_subdomain() {
     // does not produce an instance label.
     let manifest = atlassian().inner;
     assert_eq!(
-        application_label(&manifest, &state(None, Some("acme"), Some("https://atlassian.local")), None)
-            .unwrap(),
+        application_label(
+            &manifest,
+            &state(None, Some("acme"), Some("https://atlassian.local")),
+            None
+        )
+        .unwrap(),
         "Atlassian (Jira, Confluence..) - acme.atlassian.net"
     );
     assert_eq!(
-        application_label(&manifest, &state(None, None, Some("https://atlassian.local")), None)
-            .unwrap(),
+        application_label(
+            &manifest,
+            &state(None, None, Some("https://atlassian.local")),
+            None
+        )
+        .unwrap(),
         "Atlassian (Jira, Confluence..) - Atlassian (Jira, Confluence..)"
     );
 }

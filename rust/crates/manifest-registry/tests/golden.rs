@@ -36,7 +36,10 @@ fn golden_prefix_ranking() {
     // All five "Git*" apps word-prefix-match "git" and rank ahead of
     // fuzzy-only subsequence hits ("DigitalOcean", "Bit.ly"); within the
     // prefix group nucleo score decides (shorter, tighter match first).
-    assert_eq!(ids("git"), vec!["4304", "39", "123", "124", "398", "598", "289"]);
+    assert_eq!(
+        ids("git"),
+        vec!["4304", "39", "123", "124", "398", "598", "289"]
+    );
 }
 
 #[test]

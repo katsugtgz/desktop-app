@@ -89,7 +89,11 @@ impl<'de> Deserialize<'de> for ApiResponse {
 /// State slice `AppRequest` from the duck (`defaultState` = both `None`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppRequest {
-    #[serde(default, rename = "apiResponse", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "apiResponse",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub api_response: Option<ApiResponse>,
     #[serde(
         default,
@@ -109,7 +113,9 @@ pub enum AppRequestAction {
     /// `setApiResponse`.
     ApiResponse { response: ApiResponse },
     /// `setApplicationCreated`.
-    ApplicationCreated { application_created: ApplicationCreated },
+    ApplicationCreated {
+        application_created: ApplicationCreated,
+    },
 }
 
 impl AppRequest {
@@ -119,9 +125,9 @@ impl AppRequest {
             // TS: `case SUBMIT_APP_REQUEST: return state;`
             AppRequestAction::SubmitAppRequest { .. } => {}
             AppRequestAction::ApiResponse { response } => self.api_response = Some(response),
-            AppRequestAction::ApplicationCreated { application_created } => {
-                self.application_created = Some(application_created)
-            }
+            AppRequestAction::ApplicationCreated {
+                application_created,
+            } => self.application_created = Some(application_created),
         }
     }
 
@@ -257,9 +263,18 @@ mod tests {
 
     #[test]
     fn api_response_serializes_as_the_ts_enum_number() {
-        assert_eq!(serde_json::to_value(ApiResponse::Error).unwrap(), serde_json::json!(0));
-        assert_eq!(serde_json::to_value(ApiResponse::Pending).unwrap(), serde_json::json!(1));
-        assert_eq!(serde_json::to_value(ApiResponse::Done).unwrap(), serde_json::json!(2));
+        assert_eq!(
+            serde_json::to_value(ApiResponse::Error).unwrap(),
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            serde_json::to_value(ApiResponse::Pending).unwrap(),
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            serde_json::to_value(ApiResponse::Done).unwrap(),
+            serde_json::json!(2)
+        );
         assert_eq!(
             serde_json::from_value::<ApiResponse>(serde_json::json!(1)).unwrap(),
             ApiResponse::Pending
@@ -288,10 +303,19 @@ mod tests {
         let data = private_request();
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(json["themeColor"], serde_json::json!("#112233"));
-        assert_eq!(json["logoURL"], serde_json::json!("https://acme.test/logo.png"));
-        assert_eq!(json["signinURL"], serde_json::json!("https://acme.test/login"));
+        assert_eq!(
+            json["logoURL"],
+            serde_json::json!("https://acme.test/logo.png")
+        );
+        assert_eq!(
+            json["signinURL"],
+            serde_json::json!("https://acme.test/login")
+        );
         assert_eq!(json["visibility"], serde_json::json!("USER_EMAIL"));
-        assert_eq!(serde_json::from_value::<AppRequestData>(json).unwrap(), data);
+        assert_eq!(
+            serde_json::from_value::<AppRequestData>(json).unwrap(),
+            data
+        );
 
         let mut state = AppRequest::default();
         state.reduce(AppRequestAction::ApiResponse {
@@ -309,10 +333,7 @@ mod tests {
             json["applicationCreated"]["bxAppManifestURL"],
             "station-manifest://1000001"
         );
-        assert_eq!(
-            serde_json::from_value::<AppRequest>(json).unwrap(),
-            state
-        );
+        assert_eq!(serde_json::from_value::<AppRequest>(json).unwrap(), state);
 
         // Default state serializes both optional fields away.
         let json = serde_json::to_value(AppRequest::default()).unwrap();
@@ -321,10 +342,7 @@ mod tests {
     }
 
     fn service(name: &str) -> ApplicationService {
-        ApplicationService::for_tests(&format!(
-            "s11b-app-request-{name}-{}",
-            std::process::id()
-        ))
+        ApplicationService::for_tests(&format!("s11b-app-request-{name}-{}", std::process::id()))
     }
 
     fn dummy_service() -> ApplicationService {

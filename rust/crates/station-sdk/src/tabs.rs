@@ -79,15 +79,26 @@ pub trait TabsProvider: Send + Sync {
     /// Observe navigation events (`nav()`).
     async fn nav(&self) -> Result<watch::Receiver<Nav>, ProviderMissing>;
     /// Create a tab for an application and navigate to `url` (`create`).
-    async fn create(&self, consumer_id: &str, options: CreateOptions) -> Result<(), ProviderMissing>;
+    async fn create(
+        &self,
+        consumer_id: &str,
+        options: CreateOptions,
+    ) -> Result<(), ProviderMissing>;
     /// Modify tab properties (`updateTab`); unspecified fields are unchanged.
     async fn update_tab(&self, tab_id: &str, update: TabUpdate) -> Result<(), ProviderMissing>;
     /// Navigate to a tab (`navToTab`).
-    async fn nav_to_tab(&self, tab_id: &str, options: NavToTabOptions) -> Result<(), ProviderMissing>;
+    async fn nav_to_tab(
+        &self,
+        tab_id: &str,
+        options: NavToTabOptions,
+    ) -> Result<(), ProviderMissing>;
     /// Execute JavaScript in the tab's webview (`executeJavaScript`).
     async fn execute_javascript(&self, tab_id: &str, code: &str) -> Result<Value, ProviderMissing>;
     /// Get the tab's webContents state (`getTabWebContentsState`).
-    async fn get_tab_web_contents_state(&self, tab_id: &str) -> Result<TabWebContentsState, ProviderMissing>;
+    async fn get_tab_web_contents_state(
+        &self,
+        tab_id: &str,
+    ) -> Result<TabWebContentsState, ProviderMissing>;
 }
 
 #[cfg(test)]
@@ -147,23 +158,42 @@ mod tests {
             .1)
         }
 
-        async fn create(&self, _consumer_id: &str, _options: CreateOptions) -> Result<(), ProviderMissing> {
+        async fn create(
+            &self,
+            _consumer_id: &str,
+            _options: CreateOptions,
+        ) -> Result<(), ProviderMissing> {
             Ok(())
         }
 
-        async fn update_tab(&self, _tab_id: &str, _update: TabUpdate) -> Result<(), ProviderMissing> {
+        async fn update_tab(
+            &self,
+            _tab_id: &str,
+            _update: TabUpdate,
+        ) -> Result<(), ProviderMissing> {
             Ok(())
         }
 
-        async fn nav_to_tab(&self, _tab_id: &str, _options: NavToTabOptions) -> Result<(), ProviderMissing> {
+        async fn nav_to_tab(
+            &self,
+            _tab_id: &str,
+            _options: NavToTabOptions,
+        ) -> Result<(), ProviderMissing> {
             Ok(())
         }
 
-        async fn execute_javascript(&self, _tab_id: &str, _code: &str) -> Result<Value, ProviderMissing> {
+        async fn execute_javascript(
+            &self,
+            _tab_id: &str,
+            _code: &str,
+        ) -> Result<Value, ProviderMissing> {
             Ok(Value::Null)
         }
 
-        async fn get_tab_web_contents_state(&self, _tab_id: &str) -> Result<TabWebContentsState, ProviderMissing> {
+        async fn get_tab_web_contents_state(
+            &self,
+            _tab_id: &str,
+        ) -> Result<TabWebContentsState, ProviderMissing> {
             Ok(TabWebContentsState::Mounted)
         }
     }
@@ -187,14 +217,22 @@ mod tests {
         assert_eq!(nav.borrow().previous_tab_id, "t0");
 
         provider
-            .create("app1", CreateOptions {
-                application_id: "slack".into(),
-                url: "https://google.fr".into(),
-            })
+            .create(
+                "app1",
+                CreateOptions {
+                    application_id: "slack".into(),
+                    url: "https://google.fr".into(),
+                },
+            )
             .await
             .unwrap();
         provider
-            .update_tab("t1", TabUpdate { url: Some("https://google.com".into()) })
+            .update_tab(
+                "t1",
+                TabUpdate {
+                    url: Some("https://google.com".into()),
+                },
+            )
             .await
             .unwrap();
         provider
@@ -225,7 +263,8 @@ mod tests {
         let opts: NavToTabOptions = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!opts.silent);
 
-        let update: TabUpdate = serde_json::from_value(serde_json::json!({ "url": "https://x" })).unwrap();
+        let update: TabUpdate =
+            serde_json::from_value(serde_json::json!({ "url": "https://x" })).unwrap();
         assert_eq!(update.url.as_deref(), Some("https://x"));
     }
 }

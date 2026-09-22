@@ -12,9 +12,8 @@ use crate::common::{ConsumerId, ProviderMissing, ProviderSlot};
 
 /// Override for opening a resource URL. `default_open` runs the host's
 /// normal open path (e.g. open in a tab).
-pub type OpenHandler = Arc<
-    dyn Fn(&str, DefaultOpen) -> futures_boxed::BoxFuture<'static, ()> + Send + Sync,
->;
+pub type OpenHandler =
+    Arc<dyn Fn(&str, DefaultOpen) -> futures_boxed::BoxFuture<'static, ()> + Send + Sync>;
 
 /// Default open path passed to an `OpenHandler`.
 pub type DefaultOpen = Arc<dyn Fn() -> futures_boxed::BoxFuture<'static, ()> + Send + Sync>;
@@ -170,7 +169,10 @@ mod tests {
         let c = ResourcesConsumer::new("https://manifest/app.json");
         assert_eq!(c.namespace(), "resources");
         assert_eq!(c.id.as_str(), "https://manifest/app.json");
-        assert!(matches!(c.set_open_handler(None).await, Err(ProviderMissing)));
+        assert!(matches!(
+            c.set_open_handler(None).await,
+            Err(ProviderMissing)
+        ));
 
         let p = Arc::new(RecordingProvider {
             opens: AtomicUsize::new(0),

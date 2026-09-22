@@ -212,7 +212,10 @@ mod tests {
             results: None,
         });
         rx.changed().await.unwrap();
-        assert_eq!(rx.borrow_and_update().loading.as_deref(), Some("My Category"));
+        assert_eq!(
+            rx.borrow_and_update().loading.as_deref(),
+            Some("My Category")
+        );
 
         let fired = Arc::new(AtomicBool::new(false));
         let mut with_callback = item("a");

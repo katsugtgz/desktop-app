@@ -93,7 +93,10 @@ pub struct Frecency {
 
 impl Frecency {
     pub fn new(options: FrecencyOptions) -> Self {
-        Frecency { options, data: FrecencyData::default() }
+        Frecency {
+            options,
+            data: FrecencyData::default(),
+        }
     }
 
     /// Record a selection (`save`).
@@ -214,7 +217,11 @@ impl Frecency {
                 }
                 self.data.selections.insert(
                     id.to_owned(),
-                    IdSelection { times_selected: 1, selected_at: vec![date], queries },
+                    IdSelection {
+                        times_selected: 1,
+                        selected_at: vec![date],
+                        queries,
+                    },
                 );
             }
             Some(selection) => {
@@ -298,10 +305,16 @@ pub fn is_sub_query(search_query: &str, candidate: &str) -> bool {
     if candidate.is_empty() {
         return false;
     }
-    let mut query_words: Vec<String> =
-        candidate.to_lowercase().split(' ').map(str::to_owned).collect();
-    let search_words: Vec<String> =
-        search_query.to_lowercase().split(' ').map(str::to_owned).collect();
+    let mut query_words: Vec<String> = candidate
+        .to_lowercase()
+        .split(' ')
+        .map(str::to_owned)
+        .collect();
+    let search_words: Vec<String> = search_query
+        .to_lowercase()
+        .split(' ')
+        .map(str::to_owned)
+        .collect();
 
     for search in search_words {
         if search.is_empty() {
@@ -332,8 +345,16 @@ mod tests {
     #[test]
     fn save_records_query_and_id_selections() {
         let mut f = Frecency::new(FrecencyOptions::default());
-        f.save(SaveParams { search_query: Some("gmail"), selected_id: "tab-1", date_selection: Some(1000) });
-        f.save(SaveParams { search_query: Some("gmail"), selected_id: "tab-1", date_selection: Some(2000) });
+        f.save(SaveParams {
+            search_query: Some("gmail"),
+            selected_id: "tab-1",
+            date_selection: Some(1000),
+        });
+        f.save(SaveParams {
+            search_query: Some("gmail"),
+            selected_id: "tab-1",
+            date_selection: Some(2000),
+        });
 
         let qs = &f.data.queries["gmail"];
         assert_eq!(qs.len(), 1);
@@ -349,7 +370,11 @@ mod tests {
     #[test]
     fn save_without_query_skips_query_map() {
         let mut f = Frecency::new(FrecencyOptions::default());
-        f.save(SaveParams { search_query: None, selected_id: "tab-1", date_selection: Some(1000) });
+        f.save(SaveParams {
+            search_query: None,
+            selected_id: "tab-1",
+            date_selection: Some(1000),
+        });
         assert!(f.data.queries.is_empty());
         assert!(f.data.selections.contains_key("tab-1"));
     }
@@ -361,7 +386,11 @@ mod tests {
             ..Default::default()
         });
         for t in [1, 2, 3, 4] {
-            f.save(SaveParams { search_query: Some("q"), selected_id: "a", date_selection: Some(t) });
+            f.save(SaveParams {
+                search_query: Some("q"),
+                selected_id: "a",
+                date_selection: Some(t),
+            });
         }
         assert_eq!(f.data.selections["a"].selected_at, vec![3, 4]);
         assert_eq!(f.data.selections["a"].times_selected, 4);
@@ -371,17 +400,33 @@ mod tests {
     fn score_uses_recency_buckets() {
         let mut f = Frecency::new(FrecencyOptions::default());
         let now = 100 * HOUR;
-        f.save(SaveParams { search_query: Some("q"), selected_id: "a", date_selection: Some(now - HOUR) });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "a",
+            date_selection: Some(now - HOUR),
+        });
         // 1 selection, 1h old -> bucket 100 -> 1 * 100/1 = 100, weight 1.0.
         assert_eq!(f.compute_score_at("q", "a", now), 100.0);
 
-        f.save(SaveParams { search_query: Some("q"), selected_id: "b", date_selection: Some(now - 4 * HOUR) });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "b",
+            date_selection: Some(now - 4 * HOUR),
+        });
         // 4h old: past the 3h bucket, inside the 24h bucket.
         assert_eq!(f.compute_score_at("q", "b", now), 80.0);
 
         // Two saves at 1h and 4h: timesSelected 2 * avg(100, 80).
-        f.save(SaveParams { search_query: Some("q"), selected_id: "c", date_selection: Some(now - HOUR) });
-        f.save(SaveParams { search_query: Some("q"), selected_id: "c", date_selection: Some(now - 4 * HOUR) });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "c",
+            date_selection: Some(now - HOUR),
+        });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "c",
+            date_selection: Some(now - 4 * HOUR),
+        });
         assert_eq!(f.compute_score_at("q", "c", now), 2.0 * 90.0);
 
         // No query match: recent-selections weight 0.5 over the id data.
@@ -418,8 +463,16 @@ mod tests {
         let mut f = Frecency::new(FrecencyOptions::default());
         let now = 100 * HOUR;
         // 4h old scores 80, 1h old scores 100, so the sort is unambiguous.
-        f.save(SaveParams { search_query: Some("q"), selected_id: "old", date_selection: Some(now - 4 * HOUR) });
-        f.save(SaveParams { search_query: Some("q"), selected_id: "new", date_selection: Some(now - HOUR) });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "old",
+            date_selection: Some(now - 4 * HOUR),
+        });
+        f.save(SaveParams {
+            search_query: Some("q"),
+            selected_id: "new",
+            date_selection: Some(now - HOUR),
+        });
 
         let got = f.sort_at("q", &["unscored", "old", "new"], now);
         let ids: Vec<_> = got.iter().map(|(id, _)| *id).collect();
@@ -434,11 +487,27 @@ mod tests {
             recent_selections_limit: 2,
             ..Default::default()
         });
-        f.save(SaveParams { search_query: Some("q1"), selected_id: "a", date_selection: Some(1) });
-        f.save(SaveParams { search_query: Some("q2"), selected_id: "b", date_selection: Some(2) });
+        f.save(SaveParams {
+            search_query: Some("q1"),
+            selected_id: "a",
+            date_selection: Some(1),
+        });
+        f.save(SaveParams {
+            search_query: Some("q2"),
+            selected_id: "b",
+            date_selection: Some(2),
+        });
         // Re-selecting 'a' moves it to the front, making 'b' the LRU id.
-        f.save(SaveParams { search_query: None, selected_id: "a", date_selection: Some(3) });
-        f.save(SaveParams { search_query: None, selected_id: "c", date_selection: Some(4) });
+        f.save(SaveParams {
+            search_query: None,
+            selected_id: "a",
+            date_selection: Some(3),
+        });
+        f.save(SaveParams {
+            search_query: None,
+            selected_id: "c",
+            date_selection: Some(4),
+        });
 
         assert_eq!(f.data.recent_selections, vec!["c", "a"]);
         assert!(!f.data.selections.contains_key("b"));

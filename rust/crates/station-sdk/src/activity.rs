@@ -87,8 +87,16 @@ pub type QueryBatches = mpsc::Receiver<Vec<ActivityEntry>>;
 /// Host side of the activity API (`activity.ActivityProviderInterface`).
 #[async_trait]
 pub trait ActivityProvider: Send + Sync {
-    async fn push(&self, consumer_key: &str, entry: ActivityEntry) -> Result<ActivityEntryId, ProviderMissing>;
-    async fn query(&self, consumer_key: &str, args: &QueryArgs) -> Result<QueryBatches, ProviderMissing>;
+    async fn push(
+        &self,
+        consumer_key: &str,
+        entry: ActivityEntry,
+    ) -> Result<ActivityEntryId, ProviderMissing>;
+    async fn query(
+        &self,
+        consumer_key: &str,
+        args: &QueryArgs,
+    ) -> Result<QueryBatches, ProviderMissing>;
 }
 
 /// Activity consumer: `push` writes through the provider, `query` returns a
@@ -230,7 +238,10 @@ mod tests {
             entry: ActivityEntry,
         ) -> Result<ActivityEntryId, ProviderMissing> {
             let id = format!("act-{}", self.entries.read().await.len() + 1);
-            self.entries.write().await.push((consumer_key.into(), entry));
+            self.entries
+                .write()
+                .await
+                .push((consumer_key.into(), entry));
             Ok(ActivityEntryId {
                 activity_entry_id: id,
             })
@@ -272,18 +283,11 @@ mod tests {
             Some(list) => list.iter().any(|s| s == v) == want_match,
         };
         check(&scope.resource_ids, &e.resource_id)
-            && check(&scope.manifest_urls, e.manifest_url.as_deref().unwrap_or_default())
+            && check(
+                &scope.manifest_urls,
+                e.manifest_url.as_deref().unwrap_or_default(),
+            )
             && check(&scope.types, &e.type_)
-    }
-
-    fn entry(resource_id: &str, type_: &str, created_at: i64) -> ActivityEntry {
-        ActivityEntry {
-            resource_id: resource_id.into(),
-            manifest_url: None,
-            type_: type_.into(),
-            extra_data: None,
-            created_at,
-        }
     }
 
     #[tokio::test]
@@ -298,11 +302,16 @@ mod tests {
         c.set_provider(Arc::new(MemProvider::default())).await;
         let before = now_ms();
         let id = c
-            .push("r1", Some(serde_json::json!({"k": 1})), None, Some("https://m"))
+            .push(
+                "r1",
+                Some(serde_json::json!({"k": 1})),
+                None,
+                Some("https://m"),
+            )
             .await
             .unwrap();
         assert!(!id.activity_entry_id.is_empty());
-        let mut stream = c.query(PartialQueryArgs::default()).await.unwrap();
+        let stream = c.query(PartialQueryArgs::default()).await.unwrap();
         let batches: Vec<Vec<ActivityEntry>> = stream.collect().await;
         assert_eq!(batches.len(), 1);
         let e = &batches[0][0];
@@ -322,14 +331,14 @@ mod tests {
         c.push("r2", None, Some("open"), None).await.unwrap();
 
         // Defaults: limit 1, descending by createdAt -> newest only.
-        let mut stream = c.query(PartialQueryArgs::default()).await.unwrap();
+        let stream = c.query(PartialQueryArgs::default()).await.unwrap();
         let batches: Vec<_> = stream.collect().await;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
         assert_eq!(batches[0][0].resource_id, "r2");
 
         // Overrides: limit 2, ascending -> oldest first.
-        let mut stream = c
+        let stream = c
             .query(PartialQueryArgs {
                 limit: Some(2),
                 ascending: Some(true),
@@ -350,7 +359,7 @@ mod tests {
         c.push("r1", None, Some("open"), None).await.unwrap();
         c.push("r2", None, Some("close"), None).await.unwrap();
 
-        let mut stream = c
+        let stream = c
             .query(PartialQueryArgs {
                 limit: Some(10),
                 where_: Some(QueryArgsScope {
@@ -366,7 +375,7 @@ mod tests {
         assert_eq!(batches[0][0].type_, "open");
 
         // whereNot excludes.
-        let mut stream = c
+        let stream = c
             .query(PartialQueryArgs {
                 limit: Some(10),
                 where_not: Some(QueryArgsScope {
@@ -389,7 +398,7 @@ mod tests {
         a.set_provider(p.clone()).await;
         b.set_provider(p).await;
         a.push("r1", None, None, None).await.unwrap();
-        let mut stream = b
+        let stream = b
             .query(PartialQueryArgs {
                 limit: Some(10),
                 ..Default::default()
@@ -398,7 +407,7 @@ mod tests {
             .unwrap();
         let batches: Vec<_> = stream.collect().await;
         assert!(batches.is_empty()); // plugin activity, not global
-        let mut stream = a
+        let stream = a
             .query(PartialQueryArgs {
                 limit: Some(10),
                 ..Default::default()

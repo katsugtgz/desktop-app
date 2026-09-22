@@ -6,9 +6,11 @@ on:
       - main
     paths:
       - "rust/**"
+      - ".github/workflows/rust.yml"
   pull_request:
     paths:
       - "rust/**"
+      - ".github/workflows/rust.yml"
 
 defaults:
   run:
@@ -31,6 +33,9 @@ jobs:
 
       - name: Format
         run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --workspace --all-targets
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

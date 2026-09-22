@@ -27,7 +27,11 @@ pub struct StorageChanges(pub HashMap<String, StorageChange>);
 /// Host side of the storage API (`storage.StorageProviderInterface`).
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
-    async fn get_item(&self, consumer_key: &str, key: &str) -> Result<Option<Value>, ProviderMissing>;
+    async fn get_item(
+        &self,
+        consumer_key: &str,
+        key: &str,
+    ) -> Result<Option<Value>, ProviderMissing>;
     async fn set_item(
         &self,
         consumer_key: &str,
@@ -109,7 +113,11 @@ impl MemoryStorageProvider {
 
 #[async_trait]
 impl StorageProvider for MemoryStorageProvider {
-    async fn get_item(&self, consumer_key: &str, key: &str) -> Result<Option<Value>, ProviderMissing> {
+    async fn get_item(
+        &self,
+        consumer_key: &str,
+        key: &str,
+    ) -> Result<Option<Value>, ProviderMissing> {
         Ok(self
             .areas
             .read()
