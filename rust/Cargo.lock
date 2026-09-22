@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "about-window"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "activity"
 version = "0.1.0"
 dependencies = [
