@@ -74,7 +74,7 @@
    "target_crate": "(none — deletion)",
    "depends_on": [],
    "effort": "S",
-   "verification": "rg -n \"SafeWS|websocket\" C:/Users/asd/Documents/desktop-app/packages/app/src/api && rg -n \"TRAVIS_COMMIT_RANGE\" C:/Users/asd/Documents/desktop-app --glob '!node_modules' ; both must exit 1 (no matches)"
+   "verification": "rg -n \"SafeWS|websocket\" C:/Users/asd/Documents/desktop-app/packages/app/src/api && rg -n \"TRAVIS_COMMIT[_]RANGE\" C:/Users/asd/Documents/desktop-app --glob '!node_modules' ; both must exit 1 (no matches)"
   },
   {
    "order": 6,
