@@ -7,6 +7,6 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-tokio = ""
-serde = ""
-serde_json = ""
+tokio = "1.53"
+serde = "1.0"
+serde_json = "1.0"
