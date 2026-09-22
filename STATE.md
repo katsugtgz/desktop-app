@@ -4,12 +4,12 @@ Last run: 2026-09-22 dryrun L1 triage (report-only)
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **[Rust Rewrite] Execute s01-ws-scaffold** — cargo workspace scaffold, verify `cargo check --workspace` + clippy. Rust toolchain installed (cargo 1.98.1).
-2. **[Rust Rewrite] s02-sdk-core next.** Full plan: `docs/rust-rewrite-plan.md` (17 slices, verify-pass revised).
+1. **[s01-ws-scaffold] PR #1 open — human merge.** https://github.com/katsugtgz/desktop-app/pull/1
+2. **[Rust Rewrite] s02-sdk-core next** after s01 merge. Plan: `docs/rust-rewrite-plan.md`.
 
 ## Watch List
 
-- Human decisions open: Tauri vs Electron+NAPI (plan assumes Tauri), canary channel fate, macOS notarization, fuzzy-search crate pick (plan doc §Open questions).
+- Open questions RESOLVED (docs/research/rust-rewrite-decisions.md): napi-rs hybrid shell (Tauri deferred), keep electron-updater, notarization gated on Apple cert, nucleo-matcher for s08. Plan doc §Open questions updated.
 
 - Upstream Tests CI green (2026-08-15). One Release Candidate failure before. No runs on fork yet — first PR will validate.
 - Fork issues disabled; upstream issues = noise source only.

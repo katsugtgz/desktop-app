@@ -51,9 +51,11 @@ rust/
       tauri.conf.json
 ```
 
-## Open questions (human)
+## Open questions — RESOLVED 2026-09-22
 
-1. UI shell: Tauri (default in plan, slices 12–16) vs keep-Electron-shell-with-Rust-core (NAPI). Plan assumes Tauri.
-2. Canary channel (scripts/canary.js): delete, port to git2/octocrab, or cargo-dist/tauri-action semantics?
-3. macOS codesigning/notarization: upstream disabled — restore via Tauri notarization in s15 or keep disabled?
-4. Fuzzy search crate: fuse-rust vs tantivy vs hand-rolled — decide in s08 with ctx7 check.
+Research: `docs/research/rust-rewrite-decisions.md` (primary sources). Highlights:
+
+1. **Shell: sequenced hybrid.** s02–s11 crates land shell-agnostic. Bind into existing Electron main via **napi-rs** (v3, ABI-stable, smartUnpack already compatible), delete TS services slice-by-slice. Tauri deferred: multiwebview still `unstable`-flagged, WebKitGTK child-webview broken (#10131 #10420). s12/s13 become napi-binding + window-lifecycle parity slices; s15/s16 keep Electron packaging unless Tauri stabilizes. Repo fact: 0 BrowserView hits — tabs are `<webview>` tags.
+2. **Updates: keep electron-updater** under retained Electron shell. Channels work today (prerelease tiers / channel-suffixed latest.yml). canary.js = release choreography, replace with `gh` CI steps, do not port. Tauri path (if later): tauri-plugin-updater, per-channel `latest.json` endpoints. cargo-dist/axo rejected.
+3. **Notarization: gated on Apple Developer Program ($99/yr + Developer ID cert), not tooling.** If acquired: Tauri = env-var config in s15 (~half day); Electron = uncomment afterSign + ASC-key auth (altool-era script is dead, TN3147). Until then: drop mac from release matrix rather than ship unsigned.
+4. **Fuzzy search: nucleo-matcher** (s08). `Pattern::parse(...).match_list()` = scored sorted fuzzy over manifest names. Outperforms alternatives; Helix's engine.

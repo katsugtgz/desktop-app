@@ -1,0 +1,6 @@
+[package]
+name = "manifest-registry"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

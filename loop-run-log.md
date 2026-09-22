@@ -27,3 +27,9 @@ Append one entry per run. Prune entries older than 30 days.
 - Findings: 3 packages (app/appstore/sdk), ~849 ts/tsx files; Rust rewrite decomposed into slice plan (STATE.md High Priority)
 - Actions: STATE.md updated. No code edits (week-one rule).
 - Doctor: 100/100 L3 before run. Sync: 80/100 healthy.
+
+## 2026-09-22 — s01-ws-scaffold (L2 maker→verifier)
+
+- Maker subagent: 5 crates scaffold. Verifier (independent run): cargo check/clippy -D warnings/run all pass.
+- Branch rust/s01-ws-scaffold → PR #1 on fork. Awaiting human merge.
+- Rust toolchain installed: cargo 1.98.1 + clippy + rustfmt, rustup user-level.

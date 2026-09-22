@@ -1,0 +1,6 @@
+[package]
+name = "activity"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

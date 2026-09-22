@@ -57,3 +57,6 @@ yalc.lock
 # Generated files
 **/*generated.ts
 **/*generated.tsx
+
+# Rust
+rust/target/
