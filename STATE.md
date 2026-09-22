@@ -4,8 +4,8 @@ Last run: 2026-09-22 dryrun L1 triage (report-only)
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **[Rust Rewrite] Execute s01-ws-scaffold** — cargo workspace scaffold, verify `cargo check --workspace` + clippy. Rust toolchain installed (cargo 1.98.1).
-2. **[Rust Rewrite] s02-sdk-core next.** Full plan: `docs/rust-rewrite-plan.md` (17 slices, verify-pass revised).
+1. **[s01-ws-scaffold] PR #1 open — human merge.** https://github.com/katsugtgz/desktop-app/pull/1
+2. **[Rust Rewrite] s02-sdk-core next** after s01 merge. Plan: `docs/rust-rewrite-plan.md`.
 
 ## Watch List
 
