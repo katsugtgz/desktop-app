@@ -7,3 +7,4 @@ edition.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 include_dir = "0.7.4"
+nucleo-matcher = "0.3.1"
