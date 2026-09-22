@@ -146,7 +146,7 @@ impl std::fmt::Display for ApplicationError {
                 write!(f, "Application installation timeout")
             }
             ApplicationError::ManifestNotAvailable(url) => {
-                write!(f, "Could not get manifest {url}")
+                write!(f, "Could not get the manifest {url}")
             }
             ApplicationError::NotInstalled(id) => {
                 write!(f, "application {id} is not installed")
@@ -250,12 +250,12 @@ pub struct TabRecord {
     pub home: bool,
 }
 
-/// What `deleteFavorite` removes (a favorite belonging to a tab).
+/// What `deleteFavorite` removes. TS `StationFavorite` has no tab field —
+/// `getTabFavoriteId` reads the favorite's own always-present `favoriteId`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FavoriteRecord {
     pub favorite_id: String,
     pub application_id: String,
-    pub tab_id: String,
 }
 
 impl ApplicationService {
@@ -399,24 +399,16 @@ impl ApplicationService {
     /// Port of `uninstallApplication` (lifecycle.ts): close all tabs in the
     /// app, drop the application entry, remove the dock item, remove the
     /// password-manager link, delete the app's favorites.
-    ///
-    /// TS iterates favorites and deletes those with a tab `favoriteId`;
-    /// favorites without one survive — same here.
     pub fn uninstall(&mut self, application_id: &str) -> Result<(), ApplicationError> {
         if !self.installed.contains_key(application_id) {
             return Err(ApplicationError::NotInstalled(application_id.to_owned()));
         }
 
-        // deleteFavorite for each favorite tied to one of the app's tabs —
-        // collected BEFORE the tabs go away (TS iterates live state first).
-        let tab_ids: Vec<String> = self
-            .tabs
-            .iter()
-            .filter(|t| t.application_id == application_id)
-            .map(|t| t.tab_id.clone())
-            .collect();
-        self.favorites
-            .retain(|f| f.application_id != application_id || !tab_ids.contains(&f.tab_id));
+        // deleteFavorite for every favorite of the application
+        // (`getFavoritesForApplication` filters by applicationId only;
+        // `getTabFavoriteId(fav)` returns the always-present `favoriteId`,
+        // so TS deletes them all, tab or no tab).
+        self.favorites.retain(|f| f.application_id != application_id);
 
         // closeAllTabsInApp + dropApplication.
         self.tabs
@@ -596,7 +588,10 @@ pub(crate) fn start_url_for_install(
     application_id: &str,
     config_data: &ApplicationConfigData,
 ) -> Option<String> {
-    let manifest_start_url = manifest.start_url.clone()?;
+    // TS truthiness (`if (manifest.start_url)` in installApplication and
+    // `manifest.start_url!` used only after that gate): empty string means
+    // no start URL.
+    let manifest_start_url = manifest.start_url.clone().filter(|s| !s.is_empty())?;
     let presets = get_presets(manifest);
     if presets.is_empty() {
         // TS `manifest.start_url!` then `createNewTab`.
@@ -777,6 +772,27 @@ mod tests {
     }
 
     #[test]
+    fn golden_install_empty_start_url_creates_no_home_tab() {
+        // TS gates on truthiness (`if (manifest.start_url)`, lifecycle.ts:76):
+        // `''` skips createNewTab — reachable via a private manifest saved
+        // with an empty start_url.
+        let mut apps = ApplicationService::for_tests("install-empty-start");
+        apps.request_private_application(NewPrivateApplication {
+            name: "Empty".into(),
+            theme_color: "#000000".into(),
+            icon_url: "https://empty.test/logo.png".into(),
+            start_url: String::new(),
+            scope: "https://empty.test".into(),
+        });
+        let ret = apps
+            .install("station-manifest://1000001", &InstallOptions::default())
+            .unwrap();
+        let app = apps.installed_applications().get(&ret.application_id).unwrap();
+        assert_eq!(app.home_tab_url, None);
+        assert!(apps.tabs().is_empty());
+    }
+
+    #[test]
     fn golden_install_unknown_manifest_times_out_like_get_manifest_or_timeout() {
         let mut apps = ApplicationService::for_tests("install-unknown");
         let err = apps
@@ -786,7 +802,7 @@ mod tests {
             err,
             ApplicationError::ManifestNotAvailable("station-manifest://999999".to_owned())
         );
-        assert_eq!(err.to_string(), "Could not get manifest station-manifest://999999");
+        assert_eq!(err.to_string(), "Could not get the manifest station-manifest://999999");
     }
 
     #[test]
@@ -903,19 +919,19 @@ mod tests {
         let gmail = apps.install(GMAIL, &InstallOptions::default()).unwrap();
         let other = apps.install("station-manifest://157", &InstallOptions::default()).unwrap();
 
-        // A favorite tied to the app's home tab, one on a foreign app, and
-        // one with no tab of this app (different application_id entirely).
-        let home_tab = apps.tabs()[0].clone();
-        let other_tab = apps.tabs()[1].clone();
+        // Two favorites of the app (TS deletes every app favorite —
+        // getTabFavoriteId always yields favoriteId), one on a foreign app.
         apps.add_favorite_for_test(FavoriteRecord {
             favorite_id: "fav/1".into(),
             application_id: gmail.application_id.clone(),
-            tab_id: home_tab.tab_id.clone(),
+        });
+        apps.add_favorite_for_test(FavoriteRecord {
+            favorite_id: "fav/1b".into(),
+            application_id: gmail.application_id.clone(),
         });
         apps.add_favorite_for_test(FavoriteRecord {
             favorite_id: "fav/2".into(),
             application_id: other.application_id.clone(),
-            tab_id: other_tab.tab_id.clone(),
         });
         apps.add_link_for_test(&gmail.application_id, "link/1");
         apps.add_link_for_test(&other.application_id, "link/2");
@@ -930,9 +946,8 @@ mod tests {
         assert!(!apps.dock().contains(&gmail.application_id));
         // removeLink removed only the app's link.
         assert_eq!(apps.links_for_test(), vec!["link/2"]);
-        // The app's tab favorite went with it; the foreign one stayed.
+        // All of the app's favorites went with it; the foreign one stayed.
         assert_eq!(apps.favorites_for_test(), vec!["fav/2"]);
-        let _ = other_tab;
     }
 
     #[test]
