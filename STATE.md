@@ -9,7 +9,7 @@ Last run: 2026-09-22 dryrun L1 triage (report-only)
 
 ## Watch List
 
-- Human decisions open: Tauri vs Electron+NAPI (plan assumes Tauri), canary channel fate, macOS notarization, fuzzy-search crate pick (plan doc §Open questions).
+- Open questions RESOLVED (docs/research/rust-rewrite-decisions.md): napi-rs hybrid shell (Tauri deferred), keep electron-updater, notarization gated on Apple cert, nucleo-matcher for s08. Plan doc §Open questions updated.
 
 - Upstream Tests CI green (2026-08-15). One Release Candidate failure before. No runs on fork yet — first PR will validate.
 - Fork issues disabled; upstream issues = noise source only.
