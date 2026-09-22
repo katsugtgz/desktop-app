@@ -149,15 +149,40 @@ pub fn subpath_stays_in_dir(entry: &Path, resolved: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// CI runs Linux; `Url::from_file_path` rejects non-absolute
+    /// (there: Windows-drive) paths, so fixtures must be per-OS.
+    fn entry_paths() -> (&'static str, &'static str) {
+        if cfg!(windows) {
+            (
+                "C:/app/multi-instance-configuration.html",
+                "C:/app/appstore/index.html",
+            )
+        } else {
+            (
+                "/app/multi-instance-configuration.html",
+                "/app/appstore/index.html",
+            )
+        }
+    }
+
+    fn expected_url(win: &str, unix: &str) -> String {
+        if cfg!(windows) {
+            win.into()
+        } else {
+            unix.into()
+        }
+    }
+
     fn handlers() -> Vec<ProtocolHandler> {
+        let (mic, appstore) = entry_paths();
         vec![
             ProtocolHandler {
                 hostname: "multi-instance-configurator".into(),
-                file_path: PathBuf::from("C:/app/multi-instance-configuration.html"),
+                file_path: PathBuf::from(mic),
             },
             ProtocolHandler {
                 hostname: "appstore".into(),
-                file_path: PathBuf::from("C:/app/appstore/index.html"),
+                file_path: PathBuf::from(appstore),
             },
         ]
     }
@@ -169,7 +194,10 @@ mod tests {
         assert_eq!(
             r,
             WebuiResolution::Serve {
-                file_url: "file:///C:/app/appstore/index.html".into()
+                file_url: expected_url(
+                    "file:///C:/app/appstore/index.html",
+                    "file:///app/appstore/index.html",
+                )
             }
         );
     }
@@ -198,8 +226,10 @@ mod tests {
         assert_eq!(
             r,
             WebuiResolution::Serve {
-                file_url: "file:///C:/app/appstore/static/custom-app-icons/icon-simple-1.svg"
-                    .into()
+                file_url: expected_url(
+                    "file:///C:/app/appstore/static/custom-app-icons/icon-simple-1.svg",
+                    "file:///app/appstore/static/custom-app-icons/icon-simple-1.svg",
+                )
             }
         );
     }
@@ -210,7 +240,10 @@ mod tests {
         assert_eq!(
             r,
             WebuiResolution::Serve {
-                file_url: "file:///C:/app/multi-instance-configuration.html".into()
+                file_url: expected_url(
+                    "file:///C:/app/multi-instance-configuration.html",
+                    "file:///app/multi-instance-configuration.html",
+                )
             }
         );
     }
@@ -264,11 +297,15 @@ mod tests {
         assert_eq!(
             r,
             WebuiResolution::Serve {
-                file_url: "file:///C:/app/multi-instance-configuration.html".into()
+                file_url: expected_url(
+                    "file:///C:/app/multi-instance-configuration.html",
+                    "file:///app/multi-instance-configuration.html",
+                )
             }
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_paths_become_file_urls() {
         let hs = vec![ProtocolHandler {
