@@ -1,22 +1,19 @@
 # Loop State — My Project
 
-Last run: 2026-09-22 human authorized overnight autonomous run (budget waived)
+Last run: 2026-09-23 overnight executor — 16/16 slices merged, 0 verifier fails
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **[OVERNIGHT RUN ACTIVE]** Rust Slice Executor processing docs/rust-rewrite-plan.md slices s02→s17 in dependency order. Budget waived by human 2026-09-22. Rules in loop-budget.md §Slice Executor.
-2. **[Rust Rewrite] Next slices:** s02-sdk-core, s03-sdk-streams, s04-sdk-tabs-react-surface (parallel-eligible after s02), s05-ts-dead-code (independent, do first — trivial), s06+ per depends_on.
+1. **[DONE] Rust rewrite phase 1 complete.** All 16 slices merged (s01–s16). 136 tests green, 0 failed. CI: `.github/workflows/rust.yml`.
+2. **[NEXT — human gate]** Renderer/UI TS migration (napi bindings + services/ layer swap). Map: `docs/rust-napi-bridge.md` (s14 output). Post-overnight work per loop discipline.
 
 ## Watch List
 
-- PR #1 merged (s01). Fork CI has no Rust job yet — s16 adds it.
-- Repo `devEngines` requires node>=24; local v22. Run `npx`/ctx7 from OUTSIDE repo dir.
-- Open questions RESOLVED (docs/research/rust-rewrite-decisions.md): napi-rs hybrid shell (Tauri deferred), keep electron-updater, notarization gated on Apple cert, nucleo-matcher for s08. Plan §AMENDED covers s12–s16 retitle.
-- `rust-toolchain.toml` channel=stable. cargo 1.98.1 installed user-level (~/.cargo/bin — agents must export PATH).
+- 7658 lines Rust across 5 crates (station-sdk, manifest-registry, activity, appstore-schema + station-shell bin).
+- `rust.yml` CI untested on push — first push to fork will validate.
+- Notarization still gated on Apple cert (docs/research/rust-rewrite-decisions.md).
 
 ## Recent Noise (ignored this run)
-
-- Upstream tslint deprecations, old release workflow — irrelevant to Rust path.
 
 ---
 Run log: see `loop-run-log.md`

@@ -33,3 +33,10 @@ Append one entry per run. Prune entries older than 30 days.
 - Maker subagent: 5 crates scaffold. Verifier (independent run): cargo check/clippy -D warnings/run all pass.
 - Branch rust/s01-ws-scaffold → PR #1 on fork. Awaiting human merge.
 - Rust toolchain installed: cargo 1.98.1 + clippy + rustfmt, rustup user-level.
+
+## 2026-09-23 — Overnight executor COMPLETE
+
+- 52 agents, ~2.65M subagent tokens, ~5h. 16/16 slices: maker -> independent verifier -> merge. 0 verifier FAILs, all first-round PASS.
+- Workspace: 136 tests green, clippy -D warnings clean, 7658 LOC Rust, 5 crates.
+- CI: .github/workflows/rust.yml (fmt/clippy/test + rust-cache).
+- Bridge map for next phase: docs/rust-napi-bridge.md.
