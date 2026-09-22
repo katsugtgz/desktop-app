@@ -9,9 +9,23 @@
 //! Plain functions with serde-friendly return types so s14 can wire them
 //! to napi-rs without touching call sites; no `#[napi]` attributes yet.
 //!
-//! Not ported in this slice: install/uninstall/requestPrivate (s11b) and
-//! anything needing the HTTP GraphQL transport (only the local
-//! manifest-registry-backed shapes the UI actually renders are modeled).
+//! The write commands (`install` / `uninstall` / `requestPrivate`
+//! orchestration and the app-request state machine) live in
+//! [`write_commands`] and [`app_request`]. Not ported: anything needing the
+//! HTTP GraphQL transport (only the local manifest-registry-backed shapes
+//! the UI actually renders are modeled).
+
+pub mod app_request;
+pub mod write_commands;
+
+pub use app_request::{
+    submit_app_request, AppRequest, AppRequestAction, AppRequestData, ApiResponse, Steps,
+    Visibility,
+};
+pub use write_commands::{
+    ApplicationCreated, ApplicationError, ApplicationInstalledPayload, ApplicationService,
+    InstallApplicationReturn, InstallContext, InstallOptions, InstalledApplication,
+};
 
 use manifest_registry::{Manifest, MinimalApplication};
 use serde::{Deserialize, Serialize};
