@@ -1,26 +1,22 @@
 # Loop State — My Project
 
-Last run: 2026-09-22 dryrun L1 triage (report-only)
+Last run: 2026-09-22 human authorized overnight autonomous run (budget waived)
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **[s01-ws-scaffold] PR #1 open — human merge.** https://github.com/katsugtgz/desktop-app/pull/1
-2. **[Rust Rewrite] s02-sdk-core next** after s01 merge. Plan: `docs/rust-rewrite-plan.md`.
+1. **[OVERNIGHT RUN ACTIVE]** Rust Slice Executor processing docs/rust-rewrite-plan.md slices s02→s17 in dependency order. Budget waived by human 2026-09-22. Rules in loop-budget.md §Slice Executor.
+2. **[Rust Rewrite] Next slices:** s02-sdk-core, s03-sdk-streams, s04-sdk-tabs-react-surface (parallel-eligible after s02), s05-ts-dead-code (independent, do first — trivial), s06+ per depends_on.
 
 ## Watch List
 
-- Open questions RESOLVED (docs/research/rust-rewrite-decisions.md): napi-rs hybrid shell (Tauri deferred), keep electron-updater, notarization gated on Apple cert, nucleo-matcher for s08. Plan doc §Open questions updated.
-
-- Upstream Tests CI green (2026-08-15). One Release Candidate failure before. No runs on fork yet — first PR will validate.
-- Fork issues disabled; upstream issues = noise source only.
-- Repo `devEngines` requires node>=24; local v22. Run `npx` from outside repo dir.
-- CodeGraph indexed (`.codegraph/` exists). Use before rg for symbol/call-path questions.
-- `packages/app` webviews: Electron. Rust rewrite target stack decision (Tauri vs pure browser) pending — needs human input or spike slice.
+- PR #1 merged (s01). Fork CI has no Rust job yet — s16 adds it.
+- Repo `devEngines` requires node>=24; local v22. Run `npx`/ctx7 from OUTSIDE repo dir.
+- Open questions RESOLVED (docs/research/rust-rewrite-decisions.md): napi-rs hybrid shell (Tauri deferred), keep electron-updater, notarization gated on Apple cert, nucleo-matcher for s08. Plan §AMENDED covers s12–s16 retitle.
+- `rust-toolchain.toml` channel=stable. cargo 1.98.1 installed user-level (~/.cargo/bin — agents must export PATH).
 
 ## Recent Noise (ignored this run)
 
-- Upstream `tslint` deprecations, old release workflow — irrelevant to Rust path.
-- Mermaid/NSIS/Python files in language stats — build tooling only.
+- Upstream tslint deprecations, old release workflow — irrelevant to Rust path.
 
 ---
 Run log: see `loop-run-log.md`
