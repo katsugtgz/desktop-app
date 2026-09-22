@@ -30,6 +30,7 @@ dependencies = [
 name = "appstore-service"
 version = "0.1.0"
 dependencies = [
+ "handlebars",
  "manifest-registry",
  "serde",
  "serde_json",

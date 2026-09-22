@@ -1,7 +1,6 @@
 import { graphql } from 'react-apollo';
 // import { applicationsLimit, boostedTypes } from '../shared/constants/constants';
 // import { QUERY_GET_BOOSTED_APPLICATIONS } from '../graphql/schemes/boostedApplications';
-import { ALL_MOCKED_APPS } from '@src/applications/mockedAllAppsTemp';
 
 import { ApplicationsAvailable } from '../graphql/queries';
 
@@ -42,11 +41,18 @@ export type WithBoostedApplicationsProps = {
   loading?: boolean,
 };
 
-export const boostedApplications = () => {
+// s11b-appstore-write-commands removed `applications/mockedAllAppsTemp.ts`
+// and with it the mock-backed `boostedApplications()` helper. The Boosted
+// Apps screen had been rendering the three mocked apps through it since the
+// GraphQL query was commented out; the real boosted-applications source is
+// not ported yet (no read command models it — s14-appstore-ui-wiring wires
+// this screen to the appstore-service crate and decides whether the
+// boosted query comes back or the screen is dropped).
+export const boostedApplications = (): { apps: ApplicationsAvailable[] } => {
   return {
-    apps: ALL_MOCKED_APPS,
+    apps: [],
     loading: false,
-  };
+  } as { apps: ApplicationsAvailable[] };
 };
 
 // export default graphql<{}, BoostedApplicationsResponse, BoostedApplicationsRequestVariables, WithBoostedApplicationsProps>(
@@ -84,4 +90,5 @@ export const boostedApplications = () => {
 //       appStatusSync: data && data.appStatusSync ? data.appStatusSync.list : [],
 //       loading: data && data.loading,
 //     }),
-//   });
+//   },
+// );
