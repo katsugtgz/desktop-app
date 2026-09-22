@@ -6,10 +6,14 @@
 //! `manifestToMinimalApplication` projection from `packages/app/manifests/index.ts`.
 //!
 //! Not ported in this slice: icons (TS injects them as webpack url-loader
-//! data URLs; no icon embedding here), the private runtime manifests from
-//! `private.ts`, and Fuse-based fuzzy search.
+//! data URLs; no icon embedding here; private manifests keep their icon
+//! URL — that part of `private.ts` has no webpack dependency).
+
+use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 use serde::{Deserialize, Serialize};
 
 /// JSON schema for a BxApp manifest file.
@@ -239,6 +243,334 @@ pub fn manifest_to_minimal_application(manifest: &Manifest) -> MinimalApplicatio
         is_chrome_extension: get_chrome_extension_id(&manifest.inner).is_some(),
         recommended_position: manifest.inner.recommended_position(),
     }
+}
+
+/// Port of `listAllApplications`: every bundled manifest plus private ones,
+/// minus `doNotList`.
+///
+/// Private manifests come last (TS appends them after the bundled ids).
+pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
+    let mut out: Vec<Manifest> = get_all_application_ids()
+        .into_iter()
+        .filter_map(|id| get_application_by_id(&id))
+        .filter(|m| m.inner.do_not_list != Some(true))
+        .collect();
+    out.reserve(private.len());
+    for m in private {
+        if m.inner.do_not_list != Some(true) {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
+/// How well `haystack` matches the lowercased `query` word-by-word.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum WordHit {
+    /// No word-level match.
+    None,
+    /// Every query word matched as a substring of some haystack word
+    /// (Fuse finds "calendar" inside "Google Calendar").
+    Substring,
+    /// Every query word is a prefix of some haystack word ("git" →
+    /// "GitHub", "code" → "Codecov").
+    Prefix,
+}
+
+fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
+    let mut best = WordHit::Prefix;
+    for q in words {
+        let mut word_best = WordHit::None;
+        for w in haystack_lower.split(|c: char| !c.is_alphanumeric()) {
+            if w.starts_with(q) {
+                word_best = WordHit::Prefix;
+            } else if w.contains(q) {
+                word_best = word_best.max(WordHit::Substring);
+            }
+        }
+        best = best.min(word_best);
+    }
+    best
+}
+
+/// Default score for fuzzy-only matches, below any real nucleo score.
+const NO_WORD_HIT_SCORE: i64 = -1;
+
+/// Search all application manifests by name (port of `manifests.search`).
+///
+/// TS runs Fuse.js with `threshold: 0.4, keys: ['name']` over
+/// `MinimalApplication`s. The port keeps the semantics Fuse gives there —
+/// case-insensitive, subsequence matching on the whole name, word-boundary
+/// matches ranked ahead, one-typo queries still hitting — with nucleo
+/// scoring instead of Fuse's bitap distance. Ranking rule:
+/// 1. query-word prefix match ("git" → "GitHub"),
+/// 2. query-word substring match ("calendar" → "Google Calendar"),
+/// 3. nucleo fuzzy score (descending),
+/// then name, then id, for determinism.
+pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
+    let apps = list_all_applications(private);
+    // Empty pattern: Fuse.search('') returns no results; match that.
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let query_lower = query.trim().to_lowercase();
+    let words: Vec<&str> = query_lower.split_whitespace().collect();
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut hits: Vec<(WordHit, i64, MinimalApplication)> = Vec::new();
+    let mut buf = Vec::new();
+    for app in &apps {
+        let name = app.inner.name.clone().unwrap_or_default();
+        // Exact match (whole name equals the query, like Fuse's
+        // `exactMatch` bonus): always wins.
+        if name.to_lowercase() == query_lower {
+            return vec![manifest_to_minimal_application(app)];
+        }
+
+        let hit = word_hit(&name.to_lowercase(), &words);
+
+        if let WordHit::None = hit {
+            // Allow one typo per query word (Fuse bitap distance <= 1 at
+            // threshold 0.4 finds "gmial" → "Gmail"): retry each word
+            // against each name word with edit distance 1.
+            if !words.iter().all(|q| {
+                name.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| within_one_edit(q, w))
+            }) {
+                continue;
+            }
+        }
+
+        buf.clear();
+        let score = Pattern::new(&query_lower, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy)
+            .score(nucleo_matcher::Utf32Str::new(&name, &mut buf), &mut matcher)
+            .map(|s| s as i64)
+            .unwrap_or(NO_WORD_HIT_SCORE);
+        hits.push((hit, score, manifest_to_minimal_application(app)));
+    }
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.1.cmp(&a.1))
+            .then_with(|| a.2.name.cmp(&b.2.name))
+            .then_with(|| a.2.id.cmp(&b.2.id))
+    });
+    hits.into_iter().map(|(_, _, m)| m).collect()
+}
+
+/// True when `a` and `b` are within one character edit (insert, delete,
+/// substitute, or transpose of adjacent chars — Fuse's bitap covers
+/// transpositions as two edits but still ranks them at threshold 0.4 for
+/// short queries like "gmial" → "gmail") of each other.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => {
+            let diffs = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+            diffs <= 1 || (diffs == 2 && one_transposition(&a, &b))
+        }
+        std::cmp::Ordering::Less => one_insertion(&a, &b),
+        std::cmp::Ordering::Greater => one_insertion(&b, &a),
+    }
+}
+
+/// Equal-length strings differing only by one adjacent swap?
+fn one_transposition(a: &[char], b: &[char]) -> bool {
+    let first = a.iter().zip(b).position(|(x, y)| x != y);
+    let Some(i) = first else { return true };
+    i + 1 < a.len() && a[i] == b[i + 1] && a[i + 1] == b[i] && a[i + 2..] == b[i + 2..]
+}
+
+/// `short` plus exactly one inserted character equals `long`?
+fn one_insertion(short: &[char], long: &[char]) -> bool {
+    if long.len() != short.len() + 1 {
+        return false;
+    }
+    // Walk both; at most one char of `long` may be skipped.
+    let (mut i, mut skipped) = (0, false);
+    for c in long {
+        if i < short.len() && short[i] == *c {
+            i += 1;
+        } else if !skipped {
+            skipped = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Search with a private-manifest store (port of the TS pairing of
+/// `manifests.search` with `getPrivateManifests()`).
+pub fn search_with_private(query: &str, store: &PrivateStore) -> Vec<MinimalApplication> {
+    search(query, &store.get_private_manifests())
+}
+
+/// Payload for [`PrivateStore::save_new_application`]
+/// (TS `PrivateApplicationRequest`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewPrivateApplication {
+    pub name: String,
+    pub theme_color: String,
+    pub icon_url: String,
+    pub start_url: String,
+    pub scope: String,
+}
+
+/// On-disk record (TS `BxAppManifestWithId` subset that `private.ts`
+/// writes): id plus the manifest fields `saveNewApplication` fills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PrivateManifestRecord {
+    name: String,
+    scope: String,
+    icons: Vec<ImageResource>,
+    start_url: String,
+    category: String,
+    theme_color: String,
+    id: u64,
+}
+
+/// First id handed to a private manifest (TS `highestId = 1000000`).
+const PRIVATE_ID_BASE: u64 = 1_000_000;
+
+/// User-added "private" application manifests persisted as JSON in the
+/// user config dir (port of `manifests/private.ts`).
+///
+/// The TS module hardwires the path to Electron's `userData` dir and a
+/// 1-second memoization cache; the port takes the directory from the
+/// caller ([`PrivateStore::new`] uses `dirs::config_dir`) and always
+/// reads from memory, which the 1s cache only ever approximated.
+pub struct PrivateStore {
+    path: PathBuf,
+    data: Vec<PrivateManifestRecord>,
+    highest_id: u64,
+}
+
+impl PrivateStore {
+    /// Store rooted at `<config_dir>/private-manifests.json`, creating a
+    /// new empty file if none exists.
+    pub fn new() -> std::io::Result<Self> {
+        let dir = dirs_config_dir();
+        std::fs::create_dir_all(&dir)?;
+        Self::from_manifests(dir.join("private-manifests.json"))
+    }
+
+    /// Store at an explicit `path`, loading existing records from disk
+    /// when the file exists (corrupt JSON warns and starts empty, like
+    /// the TS try/catch).
+    pub fn from_manifests(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut data: Vec<PrivateManifestRecord> = Vec::new();
+        let mut highest_id = PRIVATE_ID_BASE;
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match serde_json::from_str::<PrivateFile>(&text) {
+                    Ok(file) => {
+                        for r in file.data {
+                            highest_id = highest_id.max(r.id);
+                            data.push(r);
+                        }
+                    }
+                    Err(e) => {
+                        // TS console.warn's and carries on with [].
+                        eprintln!("private-manifests.json unreadable: {e}");
+                    }
+                },
+                Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
+            }
+        }
+        Ok(Self { path, data, highest_id })
+    }
+
+    /// Port of `saveNewApplication`: assigns the next id, persists, and
+    /// returns the new id.
+    pub fn save_new_application(&mut self, payload: NewPrivateApplication) -> u64 {
+        self.highest_id += 1;
+        let manifest = PrivateManifestRecord {
+            name: payload.name,
+            scope: payload.scope,
+            icons: vec![ImageResource {
+                src: payload.icon_url,
+                platform: Some("browserx".to_owned()),
+                ..ImageResource::default()
+            }],
+            start_url: payload.start_url,
+            category: "Miscellaneous".to_owned(),
+            theme_color: payload.theme_color,
+            id: self.highest_id,
+        };
+        self.data.push(manifest);
+        self.persist().expect("write private-manifests.json");
+        self.highest_id
+    }
+
+    /// Port of `deleteManifest` (unknown id is a no-op, like TS).
+    pub fn delete_manifest(&mut self, id: u64) {
+        self.data.retain(|r| r.id != id);
+        self.persist().expect("write private-manifests.json");
+    }
+
+    /// Port of `getPrivateManifests` (TS `cleanIcon`: first icon src as
+    /// `icon`, id as string).
+    pub fn get_private_manifests(&self) -> Vec<Manifest> {
+        self.data
+            .iter()
+            .map(|r| Manifest {
+                inner: BxAppManifest {
+                    name: Some(r.name.clone()),
+                    scope: Some(r.scope.clone()),
+                    icons: r.icons.clone(),
+                    start_url: Some(r.start_url.clone()),
+                    category: Some(r.category.clone()),
+                    theme_color: Some(r.theme_color.clone()),
+                    ..BxAppManifest::default()
+                },
+                id: r.id.to_string(),
+                icon: r
+                    .icons
+                    .first()
+                    .map(|i| i.src.clone())
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    /// Port of `getPrivateApplicationById`.
+    pub fn get_private_application_by_id(&self, id: u64) -> Option<Manifest> {
+        self.get_private_manifests().into_iter().find(|m| m.id == id.to_string())
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        let json = serde_json::to_string(&PrivateFileRef { data: &self.data })?;
+        std::fs::write(&self.path, json)
+    }
+}
+
+/// The `{ "data": [...] }` envelope `private.ts` writes.
+#[derive(Serialize)]
+struct PrivateFileRef<'a> {
+    data: &'a [PrivateManifestRecord],
+}
+
+#[derive(Deserialize)]
+struct PrivateFile {
+    data: Vec<PrivateManifestRecord>,
+}
+
+/// `dirs::config_dir()` without adding a dependency for one call.
+fn dirs_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APPDATA") {
+        return PathBuf::from(dir).join("BrowserX");
+    }
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(dir).join("browserx");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("browserx");
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[cfg(test)]
