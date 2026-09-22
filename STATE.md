@@ -4,10 +4,12 @@ Last run: 2026-09-22 dryrun L1 triage (report-only)
 
 ## High Priority (loop is acting or waiting on human)
 
-1. **[Rust Rewrite] Decompose monorepo into Rust migration slices.** 3 packages: `app` (Electron main+renderer, ~849 ts/tsx), `appstore` (GraphQL API), `sdk`. Workflow phase 1 = inventory + slice plan. Slice = one PR.
-2. **[Rust Rewrite] Scaffold Rust workspace** (`Cargo.tom` workspace + crate per package) as first slice, verified by `cargo check`.
+1. **[Rust Rewrite] Execute s01-ws-scaffold** — cargo workspace scaffold, verify `cargo check --workspace` + clippy. Rust toolchain installed (cargo 1.98.1).
+2. **[Rust Rewrite] s02-sdk-core next.** Full plan: `docs/rust-rewrite-plan.md` (17 slices, verify-pass revised).
 
 ## Watch List
+
+- Human decisions open: Tauri vs Electron+NAPI (plan assumes Tauri), canary channel fate, macOS notarization, fuzzy-search crate pick (plan doc §Open questions).
 
 - Upstream Tests CI green (2026-08-15). One Release Candidate failure before. No runs on fork yet — first PR will validate.
 - Fork issues disabled; upstream issues = noise source only.

@@ -1,0 +1,276 @@
+{
+ "slices": [
+  {
+   "order": 1,
+   "id": "s01-ws-scaffold",
+   "title": "Cargo workspace scaffold: rust/ root, empty lib crates (station-sdk, manifest-registry, activity, appstore-schema) + station-shell bin stub",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/rust (new)"
+   ],
+   "target_crate": "(workspace root: rust/Cargo.toml)",
+   "depends_on": [],
+   "effort": "S",
+   "verification": "cd C:/Users/asd/Documents/desktop-app/rust && cargo check --workspace && cargo clippy --workspace -- -D warnings"
+  },
+  {
+   "order": 2,
+   "id": "s02-sdk-core",
+   "title": "SDK core: common base + facade + leaf consumers (storage, config, history, ipc, resources, session) as typed traits/state over tokio sync primitives",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/index.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/common.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/storage",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/config",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/history",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/ipc",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/resources",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/session"
+   ],
+   "target_crate": "station-sdk",
+   "depends_on": [
+    "s01-ws-scaffold"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p station-sdk && cargo clippy -p station-sdk -- -D warnings"
+  },
+  {
+   "order": 3,
+   "id": "s03-sdk-streams",
+   "title": "SDK stream consumers: search (query in / results out) + activity push/query types over tokio-stream mpsc/broadcast",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/search",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/activity"
+   ],
+   "target_crate": "station-sdk",
+   "depends_on": [
+    "s02-sdk-core"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p station-sdk && cargo clippy -p station-sdk -- -D warnings"
+  },
+  {
+   "order": 4,
+   "id": "s04-sdk-tabs-react-surface",
+   "title": "SDK tabs + react consumer trait surface (webview-coupled ops declared as trait methods, no impl)",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/tabs",
+    "C:/Users/asd/Documents/desktop-app/packages/sdk/src/react"
+   ],
+   "target_crate": "station-sdk",
+   "depends_on": [
+    "s02-sdk-core"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p station-sdk && cargo clippy -p station-sdk -- -D warnings"
+  },
+  {
+   "order": 5,
+   "id": "s05-ts-dead-code",
+   "title": "Delete dead TS: api/websocket.ts (0 in-repo consumers, rg-verified) + ci/tsc.sh Travis residue",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/api/websocket.ts",
+    "C:/Users/asd/Documents/desktop-app/ci/tsc.sh"
+   ],
+   "target_crate": "(none — deletion)",
+   "depends_on": [],
+   "effort": "S",
+   "verification": "rg -n \"SafeWS|websocket\" C:/Users/asd/Documents/desktop-app/packages/app/src/api && rg -n \"TRAVIS_COMMIT_RANGE\" C:/Users/asd/Documents/desktop-app --glob '!node_modules' ; both must exit 1 (no matches)"
+  },
+  {
+   "order": 6,
+   "id": "s06-activity-store",
+   "title": "Activity store: sqlx SQLite schema + push/query/merge service (tab-history + frecency merge ported as pure query logic)",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/activity"
+   ],
+   "target_crate": "activity",
+   "depends_on": [
+    "s01-ws-scaffold",
+    "s03-sdk-streams"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p activity (sqlite::memory: per ctx7-verified SqlitePoolOptions/Migrator) && cargo clippy -p activity -- -D warnings"
+  },
+  {
+   "order": 7,
+   "id": "s07-manifest-model",
+   "title": "Manifest model: serde BxAppManifest structs + embed JSON definitions (include_dir) + manifestToMinimalApplication mapping",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/manifests/index.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/app/manifests/definitions (data, kept as-is)"
+   ],
+   "target_crate": "manifest-registry",
+   "depends_on": [
+    "s01-ws-scaffold"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p manifest-registry (assert parsed count == JSON definition file count; serde round-trip)"
+  },
+  {
+   "order": 8,
+   "id": "s08-manifest-search-private",
+   "title": "Manifest search + private manifests: fuzzy search (fuse.js equivalent) + user-added custom manifests persisted to config dir",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/manifests/private.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/app/manifests/index.ts (list/search/popular fns)"
+   ],
+   "target_crate": "manifest-registry",
+   "depends_on": [
+    "s07-manifest-model"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p manifest-registry search private (golden queries from TS fixtures)"
+  },
+  {
+   "order": 9,
+   "id": "s09-manifest-config-rules",
+   "title": "Manifest config rules: isConfigurationRequired (subdomain/GoogleAccount/on-premise MultiInstanceConfigPreset), handlebars identity-email templating, getChromeExtensionId",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/abstract-application/helpers.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/applications/manifest-provider/bxAppManifest.ts (types)"
+   ],
+   "target_crate": "manifest-registry (config_rules module)",
+   "depends_on": [
+    "s07-manifest-model"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p manifest-registry config_rules (golden cases transcribed from TS helper tests/behavior)"
+  },
+  {
+   "order": 10,
+   "id": "s10-appstore-schema-types",
+   "title": "Appstore schema + state types: copy remote SDL verbatim, serde Application/Category + UI-state (ModalStatus/wizard/search) replacing Apollo local cache (Client.ts, resolvers, typeDefs, initialClientState, types/ collapse)",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/api-schema.graphqls",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/client-schema.graphqls",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/Client.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/resolvers",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/typeDefs.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/initialClientState",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/types",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/schemes/applications.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/schema.json (drop)"
+   ],
+   "target_crate": "appstore-schema",
+   "depends_on": [
+    "s01-ws-scaffold"
+   ],
+   "effort": "M",
+   "verification": "diff C:/Users/asd/Documents/desktop-app/packages/appstore/api-schema.graphqls rust/crates/appstore-schema/schema/api.graphqls (empty) && cargo test -p appstore-schema"
+  },
+  {
+   "order": 11,
+   "id": "s11-appstore-commands",
+   "title": "Appstore/app-store data service as Tauri commands: applications.search/getPrivateApps/requestPrivate/uninstallByManifest + install orchestration (auto-install app-store/Slack), popular/categories over manifest-registry; replaces bxApi bridge backend + app-store sagas",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/app-store",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/api.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/app-request/duck.ts (state machine portion)",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/applications/mockedAllAppsTemp.ts (deleted once commands serve data)"
+   ],
+   "target_crate": "station-shell (appstore commands module)",
+   "depends_on": [
+    "s06-activity-store",
+    "s08-manifest-search-private",
+    "s09-manifest-config-rules",
+    "s10-appstore-schema-types"
+   ],
+   "effort": "L",
+   "verification": "cargo test -p station-shell appstore && cargo clippy -p station-shell -- -D warnings"
+  },
+  {
+   "order": 12,
+   "id": "s12-about-window",
+   "title": "About window: Tauri WebviewWindow lifecycle (blur/Escape close), content as retained plain frontend page",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/about-window"
+   ],
+   "target_crate": "station-shell",
+   "depends_on": [
+    "s01-ws-scaffold"
+   ],
+   "effort": "S",
+   "verification": "cargo check -p station-shell && cargo build -p station-shell"
+  },
+  {
+   "order": 13,
+   "id": "s13-shell-protocols",
+   "title": "Custom protocols: 'appstore' hostname handler (replaces packages/appstore/handler.ts) + station:// / station-manifest:// schemes, frontend served via protocol",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/handler.ts",
+    "C:/Users/asd/Documents/desktop-app/packages/app/src/app-main.js (protocol registration portion)"
+   ],
+   "target_crate": "station-shell",
+   "depends_on": [
+    "s01-ws-scaffold",
+    "s10-appstore-schema-types"
+   ],
+   "effort": "M",
+   "verification": "cargo test -p station-shell protocols (unit: scheme/hostname routing table) && cargo check -p station-shell"
+  },
+  {
+   "order": 14,
+   "id": "s14-appstore-ui-wiring",
+   "title": "Frontend bridge swap: replace window.bxApi with tauri invoke in app.tsx/api.ts/HOCs/AppStoreMyCustomApps; drop Apollo client-state HOCs for typed state; delete mock datasets",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/app.tsx",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/HOC",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/components (bxApi call sites)",
+    "C:/Users/asd/Documents/desktop-app/packages/appstore/src/graphql/schemes (client schemes)"
+   ],
+   "target_crate": "station-shell (frontend/)",
+   "depends_on": [
+    "s11-appstore-commands",
+    "s13-shell-protocols"
+   ],
+   "effort": "L",
+   "verification": "rg -n \"window\\.bxApi|mockedAllAppsTemp|mockedMostPopularApps\" C:/Users/asd/Documents/desktop-app/packages/appstore/src (must exit 1) && yarn workspace @getstation/appstore build"
+  },
+  {
+   "order": 15,
+   "id": "s15-packaging-tauri",
+   "title": "Packaging: tauri.conf.json bundles (appimage/deb/rpm/nsis/app), icons from packages/app/build, URL-scheme config, entitlements; delete after-pack.js/notarize.js/installer.nsh hacks",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/packages/app/electron-builder.yml",
+    "C:/Users/asd/Documents/desktop-app/scripts/after-pack.js",
+    "C:/Users/asd/Documents/desktop-app/scripts/notarize.js",
+    "C:/Users/asd/Documents/desktop-app/packages/app/build (icons/entitlements)"
+   ],
+   "target_crate": "station-shell (tauri.conf.json)",
+   "depends_on": [
+    "s12-about-window",
+    "s14-appstore-ui-wiring"
+   ],
+   "effort": "L",
+   "verification": "cargo tauri build --debug (exit 0; per-OS artifacts confirmed in CI matrix)"
+  },
+  {
+   "order": 16,
+   "id": "s16-ci-rust",
+   "title": "CI/release workflows: tests.yml -> cargo build/clippy/test + rust-cache (drop Electron prefetch); dedupe release.yml + release-candidate.yml into reusable workflow with channel input, tag-driven",
+   "source_paths": [
+    "C:/Users/asd/Documents/desktop-app/.github/workflows/tests.yml",
+    "C:/Users/asd/Documents/desktop-app/.github/workflows/release.yml",
+    "C:/Users/asd/Documents/desktop-app/.github/workflows/release-candidate.yml"
+   ],
+   "target_crate": "(none — CI config)",
+   "depends_on": [
+    "s15-packaging-tauri"
+   ],
+   "effort": "M",
+   "verification": "actionlint C:/Users/asd/Documents/desktop-app/.github/workflows (exit 0)"
+  }
+ ],
+ "workspace_layout": "rust/                                  # new top-level, alongside packages/\n  Cargo.toml                           # [workspace] members = [\"crates/*\"]\n  rust-toolchain.toml                  # pinned stable\n  crates/\n    station-sdk/                        # from packages/sdk — plugin SDK types/traits\n      src/{lib.rs, common.rs, storage.rs, config.rs, history.rs, ipc.rs,\n           resources.rs, session.rs, search.rs, activity.rs, tabs.rs, react.rs}\n    manifest-registry/                  # from packages/app/manifests + abstract-application helpers\n      src/{lib.rs, model.rs, search.rs, private.rs, config_rules.rs}\n      definitions/                      # embedded via include_dir (JSON manifests, kept verbatim)\n    activity/                           # from packages/app/src/activity\n      src/{lib.rs, store.rs, query.rs}\n      migrations/                       # sqlx SQLite migrations\n    appstore-schema/                    # from packages/appstore graphql data layer\n      schema/api.graphqls               # verbatim copy of api-schema.graphqls\n      src/{lib.rs, types.rs, state.rs}\n    station-shell/                      # Tauri app (bin) — last slices land here\n      src/{main.rs, about.rs, protocols.rs, commands/appstore.rs}\n      tauri.conf.json\n      frontend/                         # retained React UI (appstore + about), vite-built\n        (ported from packages/appstore/src + about-window content)\n# Deleted in place (no crate): packages/app/src/api/websocket.ts, ci/tsc.sh,\n# scripts/after-pack.js, scripts/notarize.js, packages/appstore/schema.json,\n# packages/appstore/src/applications/mocked*.ts",
+ "open_questions": [
+  "Shell strategy is the plan's biggest fork: Tauri v2 (assumed by slices 11-16) vs wry-direct vs keep-Electron-shell-with-Rust-core (NAPI). Deciding anything but Tauri reshapes slices 12-16.",
+  "tabs/BrowserView epic is out of inventoried scope: ~49 of 564 files import electron, tabs use BrowserView/webContents everywhere (the 'real moat'). station-sdk tabs trait (s04) declares the surface, but the webview host impl needs its own follow-up plan.",
+  "GraphQL fate: client Apollo cache is pure UI state with NO transport (Client.ts has no HttpLink; remote queries dead, HOCs on mocks/bxApi). Plan collapses it into typed Rust/TS state (s10/s14) — confirm no requirement to keep a GraphQL API (async-graphql/cynic parity would change s10/s11).",
+  "Remote Station API (api.getstation.com/graphql): dead in practice. Drop entirely (plan assumes yes) or wire a real client? Also decides whether UPDATE_APPLICATION_FROM_RECIPE/DELETE_APPLICATION ever get a backend.",
+  "Station plugin runtime host side (packages/app/src/sdk providers, manifests/runtime plugins: slack/gdrive/notion/slite; 66 files import @getstation/sdk) — ported into station-shell after s04, but not sliced here; needs its own inventory pass.",
+  "Unverified crate picks pending per-slice ctx7 re-runs under Node 24 (machine has Node 22, npm EBADDEVENGINES; pnpm dlx works): fuzzy-search crate (fuse.js equivalent — fuse-rust vs tantivy vs hand-rolled), handlebars templating crate, tokio-stream watch/broadcast choices for sdk consumers. Only sqlx SQLite was verified this pass.",
+  "Canary channel (scripts/canary.js, getstation/station-canary): delete, port to git2/octocrab, or adopt cargo-dist/tauri-action channel semantics? Not sliced until decided.",
+  "Not a git repo (no .git) — slice-per-PR discipline requires initializing git / deciding fork relationship to getstation/desktop-app before slice 1 merges anywhere.",
+  "macOS codesigning/notarization currently disabled upstream (afterSign commented out) — restore under Tauri's native notarization in s15 or keep disabled?"
+ ]
+}
