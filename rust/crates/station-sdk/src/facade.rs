@@ -6,11 +6,13 @@
 
 use std::sync::Arc;
 
+use crate::activity::ActivityConsumer;
 use crate::common::ConsumerId;
 use crate::config::ConfigConsumer;
 use crate::history::HistoryConsumer;
 use crate::ipc::IpcConsumer;
 use crate::resources::ResourcesConsumer;
+use crate::search::SearchConsumer;
 use crate::session::SessionConsumer;
 use crate::storage::StorageConsumer;
 
@@ -30,12 +32,14 @@ pub trait Provider: Send + Sync {
 
 /// The SDK facade: typed consumers for one app (`SDK`).
 pub struct Sdk {
+    pub search: SearchConsumer,
     pub storage: StorageConsumer,
     pub config: ConfigConsumer,
     pub history: HistoryConsumer,
     pub ipc: IpcConsumer,
     pub resources: ResourcesConsumer,
     pub session: SessionConsumer,
+    pub activity: ActivityConsumer,
 }
 
 impl Sdk {
@@ -43,6 +47,7 @@ impl Sdk {
     pub fn new(options: &SdkOptions, provider: Arc<dyn Provider>) -> Arc<Sdk> {
         let id = ConsumerId::new(options.id.clone());
         let sdk = Arc::new(Sdk {
+            search: SearchConsumer::new(id.clone()),
             storage: StorageConsumer::new(id.clone()),
             config: ConfigConsumer::new(id.clone()),
             history: HistoryConsumer::new(id.clone()),
@@ -51,7 +56,8 @@ impl Sdk {
             // facade constructor only receives `options.id`, so that is what
             // TS passes (`new ResourcesConsumer(options.id)`).
             resources: ResourcesConsumer::new(options.id.clone()),
-            session: SessionConsumer::new(id),
+            session: SessionConsumer::new(id.clone()),
+            activity: ActivityConsumer::new(id),
         });
         provider.register(&sdk);
         sdk
@@ -96,12 +102,14 @@ mod tests {
             provider.clone(),
         );
         assert_eq!(provider.registered.load(Ordering::SeqCst), 1);
+        assert_eq!(sdk.search.namespace(), "search");
         assert_eq!(sdk.storage.namespace(), "storage");
         assert_eq!(sdk.config.namespace(), "config");
         assert_eq!(sdk.history.namespace(), "history");
         assert_eq!(sdk.ipc.namespace(), "ipc");
         assert_eq!(sdk.resources.namespace(), "resources");
         assert_eq!(sdk.session.namespace(), "session");
+        assert_eq!(sdk.activity.namespace(), "activity");
         assert_eq!(sdk.storage.id.as_str(), "app1");
 
         sdk.close(provider.as_ref());
