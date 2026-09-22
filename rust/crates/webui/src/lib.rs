@@ -153,14 +153,24 @@ mod tests {
     /// (there: Windows-drive) paths, so fixtures must be per-OS.
     fn entry_paths() -> (&'static str, &'static str) {
         if cfg!(windows) {
-            ("C:/app/multi-instance-configuration.html", "C:/app/appstore/index.html")
+            (
+                "C:/app/multi-instance-configuration.html",
+                "C:/app/appstore/index.html",
+            )
         } else {
-            ("/app/multi-instance-configuration.html", "/app/appstore/index.html")
+            (
+                "/app/multi-instance-configuration.html",
+                "/app/appstore/index.html",
+            )
         }
     }
 
     fn expected_url(win: &str, unix: &str) -> String {
-        if cfg!(windows) { win.into() } else { unix.into() }
+        if cfg!(windows) {
+            win.into()
+        } else {
+            unix.into()
+        }
     }
 
     fn handlers() -> Vec<ProtocolHandler> {
