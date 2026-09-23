@@ -40,3 +40,11 @@ Append one entry per run. Prune entries older than 30 days.
 - Workspace: 136 tests green, clippy -D warnings clean, 7658 LOC Rust, 5 crates.
 - CI: .github/workflows/rust.yml (fmt/clippy/test + rust-cache).
 - Bridge map for next phase: docs/rust-napi-bridge.md.
+
+## 2026-09-23 — Bridge executor COMPLETE
+
+- 9 agents, ~544k tokens. w01/w02/w03 all verified PASS round 1, merged.
+- station-bridge: napi 3 cdylib, 9 perform exports + 6 watcher exports (ThreadsafeFunction), envelope semantics per bridge doc.
+- worker.ts: rust path behind STATION_RUST_BRIDGE=1, default unchanged. Renderer/preload untouched.
+- 145 tests green, clippy -D warnings clean, node smoke 15/15 checks.
+- w02 branch cleanup post-error done manually.
