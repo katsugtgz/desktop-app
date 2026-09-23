@@ -1,5 +1,4 @@
 import { IpcRendererEvent } from 'electron';
-import { Observable } from 'rxjs';
 import { ApplicationConfigData } from '../applications/duck';
 import { MinimalApplication } from '../applications/graphql/withApplications';
 import { BxAppManifest } from '../applications/manifest-provider/bxAppManifest';
@@ -8,32 +7,12 @@ import { AuthProviders } from '../user-identities/types';
 
 type AppManifest = Omit<BxAppManifest, 'icons'> & { id: string, icon: string };
 
-type AnalyticsIdentity = {
-  userId: string,
-  traits: {
-    email: string,
-    name: string,
-    firstName: string,
-    lastName: string,
-  },
-};
-
-type ServiceAndCorrespondingApplications = {
-  applications: {
-    activeTab: string,
-    applicationId: string,
-    computedInstanceLabel?: string,
-  }[],
-  serviceId: string,
-  captiveURLScheme: RegExp,
-  category: string,
-  iconColor: string,
-  iconId: string,
-  id: string,
-  name: string,
-  noDockIcon?: boolean,
-  signin_url: string,
-};
+/**
+ * Dead surface removed in w03 (bridge doc §Not ported): `user`, `services`,
+ * `Runtime`, `AuthorizationError`, `NoMethodError`, `SystemError` — declared
+ * here historically but never constructed by `webview-preload.js`; zero
+ * runtime references verified via rg before deletion.
+ */
 
 export type PrivateApplicationRequest = {
   name: string,
@@ -44,44 +23,6 @@ export type PrivateApplicationRequest = {
 };
 
 declare module BxAPI {
-
-  class AuthorizationError extends Error {}
-  class NoMethodError extends Error {}
-  class SystemError extends Error {}
-  type Error = AuthorizationError | NoMethodError | SystemError;
-
-  type ObservableResponse<T> = Observable<T>;
-  type ActionResponse<T> = Promise<T>;
-
-  /* private */
-  class Runtime {
-    static observe<T>(channel: string): ObservableResponse<T>;
-    static perform<T>(channel: string, payload?: any): ActionResponse<T>;
-    static appIsReady(): Promise<void>;
-    static onBeforeUnload(): void;
-  }
-
-  /**
-   * User
-   * @since 1.11.0
-   */
-  interface User {
-    /**
-     * id
-     * @since 1.11.0
-     */
-    id: ObservableResponse<string>,
-    /**
-     * firstName
-     * @since 1.11.0
-     */
-    firstName: ObservableResponse<string>,
-    /**
-     * identity
-     * @since 1.11.0
-     */
-    identity: ObservableResponse<AnalyticsIdentity>,
-  }
 
   /**
    * Theme
@@ -103,33 +44,6 @@ declare module BxAPI {
 
     addNotificationClickListener(listener: (event: IpcRendererEvent, notificationId: string) => void): void;
     removeNotificationClickListener(listener: (event: IpcRendererEvent, notificationId: string) => void): void;
-  }
-
-  /**
-   * Services
-   * @since 1.11.0
-   */
-  interface Services {
-    /**
-     * installByServiceId
-     * @since 1.11.0
-     */
-    installByServiceId: (serviceId: string) => ActionResponse<void>,
-    /**
-     * installedServicesIds
-     * @since 1.11.0
-     */
-    installedServicesIds: ObservableResponse<string[]>
-    /**
-     * servicesAndCorrespondingApplications
-     * @since 1.11.0
-     */
-    servicesAndCorrespondingApplications: ObservableResponse<ServiceAndCorrespondingApplications[]>,
-    /**
-     * availableServicesToInstall
-     * @since 1.11.0
-     */
-    availableServicesToInstall: ObservableResponse<string[]>,
   }
 
   interface Manifest {
@@ -162,10 +76,8 @@ declare module BxAPI {
  * @since 1.11.0
  */
 interface Bx {
-  user: BxAPI.User,
   theme: BxAPI.Theme,
   notificationCenter: BxAPI.NotificationCenter,
-  services: BxAPI.Services,
   applications: BxAPI.Applications,
   identities: BxAPI.Identities,
   // Only available on station:// tabs

@@ -14,6 +14,7 @@ import { ServiceSubscription } from '../../lib/class';
 import { observer } from '../../lib/helpers';
 import { RPC } from '../../lib/types';
 import { SDKv2Actions, SDKv2Selectors, SDKv2Service, SDKv2ServiceObserver } from './interface';
+import { loadRustBridge, rustBridgeCallAction, rustBridgeSubscribe, rustBridgeEmit } from './rust-bridge';
 import { service } from '../../lib/decorator';
 
 const bxAPIAllowedActions = [
@@ -116,6 +117,9 @@ export class SDKv2ServiceImpl extends SDKv2Service implements RPC.Interface<SDKv
   constructor(uuid?: string) {
     super(uuid);
     if (this.uuid === '__default__') {
+      if (process.env.STATION_RUST_BRIDGE === '1') {
+        loadRustBridge();
+      }
       initPreloadListener(this);
     }
   }
@@ -123,9 +127,43 @@ export class SDKv2ServiceImpl extends SDKv2Service implements RPC.Interface<SDKv
   setStore(store: StationStoreWorker) {
     this.store = store;
     this.observableStore = subscribeStore(store).pipe(share()) as Observable<StationState>;
+
+    // rust-bridge path (w03): feed the three selector channels into the Rust
+    // hub on every store change; addObserver bypasses the rxjs pipeline for
+    // these channels when the addon is loaded. Same selector + distinctUntilChanged
+    // as the legacy addObserver below, minus its immediate first tick — the
+    // Rust hub emits its current value itself on subscribe.
+    if (process.env.STATION_RUST_BRIDGE === '1' && this.uuid === '__default__') {
+      for (const selectorObserver of bxAPIAllowedSelectorsObservers) {
+        let started = false;
+        this.observableStore
+          .pipe(
+            map(state => {
+              if (typeof selectorObserver.selector === 'function') {
+                return selectorObserver.selector(state);
+              }
+              return selectorObserver.selector;
+            }),
+            distinctUntilChanged()
+          ).subscribe((value: any) => {
+            if (!started) {
+              started = true;
+              return;
+            }
+            rustBridgeEmit(selectorObserver.channel as string, value);
+          });
+      }
+    }
   }
 
   async callAction(channel: SDKv2Actions | SDKv2Selectors, payload: any) {
+    // rust-bridge path: opt-in via STATION_RUST_BRIDGE=1, only for channels
+    // whose napi backend exists; everything else keeps the dispatch below
+    const rustResult = rustBridgeCallAction(channel, payload);
+    if (rustResult !== null) {
+      return rustResult;
+    }
+
     const bxAPIAction = bxAPIAllowedActions.find(action => action.channel === channel);
 
     if (bxAPIAction) {
@@ -156,6 +194,14 @@ export class SDKv2ServiceImpl extends SDKv2Service implements RPC.Interface<SDKv
     const selectorObserver = bxAPIAllowedSelectorsObservers.find(selector => selector.channel === channel);
 
     if (selectorObserver) {
+      // rust-bridge path (w03): subscribe on the Rust-side hub instead of
+      // the rxjs tap; the store taps registered in initPreloadListener push
+      // selector values into the hub via rustBridgeEmit.
+      const rustUnsubscribe = rustBridgeSubscribe(channel as string, (value: any) => obs.on!(value));
+      if (rustUnsubscribe !== null) {
+        return new ServiceSubscription(rustUnsubscribe);
+      }
+
       const sub = this.observableStore
         .pipe(
           map(state => {
