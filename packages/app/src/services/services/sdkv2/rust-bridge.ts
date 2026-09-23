@@ -111,3 +111,55 @@ export const rustBridgeCallAction = (channel: string, payload: any): Promise<any
     : params.map((p: string) => (payload ? payload[p] : undefined));
   return fn(...args);
 };
+
+/**
+ * Selector-watch path (w03, bridge doc §theme/§identities + snooze row).
+ * Channel -> [watchFn, unwatchFn, emitFn] on the addon; all three exist for
+ * every channel so teardown and store taps share one table.
+ */
+const WATCHED_CHANNELS: Record<string, [string, string, string]> = {
+  GetThemeColors: ['watchThemeColors', 'unwatchThemeColors', 'emitThemeColors'],
+  GetAllIdentities: ['watchIdentities', 'unwatchIdentities', 'emitIdentities'],
+  GetSnoozeDuration: ['watchSnoozeDuration', 'unwatchSnoozeDuration', 'emitSnoozeDuration'],
+};
+
+/**
+ * Register `onValue` on the Rust-side hub for `channel`. The current value
+ * (if one was already emitted) is delivered synchronously — same contract as
+ * `subscribeStore`'s immediate first emission. Returns a teardown fn, or
+ * `null` when the channel is not bridged / the addon is not loaded.
+ */
+export const rustBridgeSubscribe = (
+  channel: string,
+  onValue: (value: any) => void
+): (() => void) | null => {
+  if (bridge === undefined) return null;
+
+  const entry = WATCHED_CHANNELS[channel];
+  if (!entry) return null;
+
+  const [watchFn, unwatchFn] = entry;
+  if (typeof bridge[watchFn] !== 'function') return null;
+
+  const id = bridge[watchFn](onValue);
+  // Explicit worker-side teardown — the deliberate divergence from the
+  // renderer-local ipcRenderer.off leak noted in the bridge doc §Transport.
+  return () => { bridge[unwatchFn](id); };
+};
+
+/**
+ * Push a freshly computed selector value into the Rust hub, which fans it out
+ * to every subscribed renderer. Returns true when handled.
+ */
+export const rustBridgeEmit = (channel: string, value: any): boolean => {
+  if (bridge === undefined) return false;
+
+  const entry = WATCHED_CHANNELS[channel];
+  if (!entry) return false;
+
+  const emitFn = bridge[entry[2]];
+  if (typeof emitFn !== 'function') return false;
+
+  emitFn(value);
+  return true;
+};

@@ -18,6 +18,9 @@
 //! `Mutex`, initialized lazily from the embedded manifest definitions plus
 //! the user config dir's `private-manifests.json` (same rooting as
 //! `manifest_registry::PrivateStore::new`).
+//!
+//! The selector-watch surface (w03) lives in [`watchers`] (pure core) and
+//! `watchers_napi` (napi exports).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,6 +31,9 @@ use manifest_registry::{Manifest, MinimalApplication, NewPrivateApplication};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use serde_json::{json, Map, Value};
+
+mod watchers;
+mod watchers_napi;
 
 /// Process-global service state, initialized on first use.
 static SERVICE: Mutex<Option<ApplicationService>> = Mutex::new(None);
