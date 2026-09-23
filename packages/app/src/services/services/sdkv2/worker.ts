@@ -14,6 +14,7 @@ import { ServiceSubscription } from '../../lib/class';
 import { observer } from '../../lib/helpers';
 import { RPC } from '../../lib/types';
 import { SDKv2Actions, SDKv2Selectors, SDKv2Service, SDKv2ServiceObserver } from './interface';
+import { loadRustBridge, rustBridgeCallAction } from './rust-bridge';
 import { service } from '../../lib/decorator';
 
 const bxAPIAllowedActions = [
@@ -116,6 +117,9 @@ export class SDKv2ServiceImpl extends SDKv2Service implements RPC.Interface<SDKv
   constructor(uuid?: string) {
     super(uuid);
     if (this.uuid === '__default__') {
+      if (process.env.STATION_RUST_BRIDGE === '1') {
+        loadRustBridge();
+      }
       initPreloadListener(this);
     }
   }
@@ -126,6 +130,13 @@ export class SDKv2ServiceImpl extends SDKv2Service implements RPC.Interface<SDKv
   }
 
   async callAction(channel: SDKv2Actions | SDKv2Selectors, payload: any) {
+    // rust-bridge path: opt-in via STATION_RUST_BRIDGE=1, only for channels
+    // whose napi backend exists; everything else keeps the dispatch below
+    const rustResult = rustBridgeCallAction(channel, payload);
+    if (rustResult !== null) {
+      return rustResult;
+    }
+
     const bxAPIAction = bxAPIAllowedActions.find(action => action.channel === channel);
 
     if (bxAPIAction) {
