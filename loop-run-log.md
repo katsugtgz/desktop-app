@@ -48,3 +48,12 @@ Append one entry per run. Prune entries older than 30 days.
 - worker.ts: rust path behind STATION_RUST_BRIDGE=1, default unchanged. Renderer/preload untouched.
 - 145 tests green, clippy -D warnings clean, node smoke 15/15 checks.
 - w02 branch cleanup post-error done manually.
+
+## 2026-11-18 — rust-rune-port COMPLETE (slices 1-7)
+
+- Pattern: rust-rune-port, L2 maker→verifier per slice, 7 slices in sequence (no merge gates run; human gate next).
+- Slices: 1 Rune app + rail/pane + tokens; 2 webview seam (PaneRect/WebviewHost/fake); 3 wry WebView2 child (parenting + bounds verified); 4 App Store as Rune UI (install/uninstall + search); 5 session persistence (`session-store`, `ApplicationService::restore`, window placement); 6 Settings + notification panel + preset apps unblocked (`resolve_start_url`); 7 new-window routing through `url-router` + release build + `rust/README.md`.
+- Crates added/used: `station-shell` (shell), `session-store`, `notification-center`, `url-router`, `appstore-service`, `manifest-registry`. Rune pinned at 10a39584 with five vendored patched crates (`rust/vendor/`).
+- Tests: appstore-service 47, session-store 12, station-shell 38 (plus the workspace's other crates) — `cargo test --workspace` green.
+- Verification: `cargo fmt --all --check` clean; `cargo test --workspace` 292 passing; clippy clean with `cargo clippy --workspace --all-targets --exclude station-bridge -- -D warnings` — the full workspace clippy still fails only in `station-bridge`'s lib-test target (14 pre-existing dead-code errors, crate untouched; see `rust/README.md`); headless snapshots of the store, Settings and the notification panel viewed; windowed smokes observed a `WRY_WEBVIEW` child at the content pane, Settings/notifications hiding and restoring it, Gmail navigating to `accounts.google.com`, and a `window.open` routed to the OS browser (`smoke: external https://example.com/popup-smoke`). Final independent verification: WebView2's browser process would not start in that desktop session (`0x80070057`; 10/10 incl. fresh profile), so page rendering is unverified — child HWND geometry and the degraded path were verified; retest on another desktop session.
+- Outcome: fix-proposed (all work landed in the worktree; no push/PR — human gate). Next: run `cargo run -p station-shell` on a desktop and review the gaps in `rust/README.md`.

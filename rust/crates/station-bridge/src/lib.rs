@@ -252,7 +252,11 @@ pub fn request_private_application(recipe: Value) -> Result<Value> {
         scope: field("scope")?,
     };
     with_service(|service| {
-        let created = service.request_private_application(new_private);
+        // The store write can fail (read-only or full disk): the bridge reports it as the same
+        // generic failure every other appstore error uses.
+        let created = service
+            .request_private_application(new_private)
+            .map_err(app_err)?;
         Ok(json!({
             "body": {
                 "id": created.id,

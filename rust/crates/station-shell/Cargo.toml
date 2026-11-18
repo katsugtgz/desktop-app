@@ -4,3 +4,23 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+appstore-service = { path = "../appstore-service" }
+dirs = "7"
+manifest-registry = { path = "../manifest-registry" }
+notification-center = { path = "../notification-center" }
+serde_json = { workspace = true }
+session-store = { path = "../session-store" }
+url-router = { path = "../url-router" }
+# `tooling` keeps Rune's headless flags (`--snap`, `--tree`, …) in release builds: the shell's
+# snapshots are how its views are checked without a window, and Rune leaves them out of release
+# binaries unless asked.
+rune = { git = "https://github.com/anomalyco/rune", rev = "10a39584cc1ff739477be52e333a742a024ac956", features = ["tooling"] }
+
+# The app pane's web content: a WebView2 child window parented to the Rune window. Windows only
+# for now (`webview::platform` reports `Unsupported` elsewhere), and `default-features = false`
+# keeps wry's GTK/webkit dependencies out of non-Windows resolution.
+[target.'cfg(target_os = "windows")'.dependencies]
+# `ShellExecuteW` opens the default browser with a single string: no command interpreter sees a
+# page-controlled URL (the old `cmd /C start` did).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+wry = { version = "0.57", default-features = false }

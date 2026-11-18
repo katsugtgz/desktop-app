@@ -271,11 +271,9 @@ pub fn manifest_to_minimal_application(manifest: &Manifest) -> MinimalApplicatio
 ///
 /// Private manifests come last (TS appends them after the bundled ids).
 pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
-    let mut out: Vec<Manifest> = get_all_application_ids()
-        .into_iter()
-        .filter_map(|id| get_application_by_id(&id))
-        .filter(|m| m.inner.do_not_list != Some(true))
-        .collect();
+    // The bundled definitions are static; parse them once instead of once
+    // per search call (the TS module parses them a single time at import).
+    let mut out: Vec<Manifest> = bundled_applications().clone();
     out.reserve(private.len());
     for m in private {
         if m.inner.do_not_list != Some(true) {
@@ -283,6 +281,18 @@ pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
         }
     }
     out
+}
+
+/// Bundled, non-`doNotList` manifests, parsed once per process.
+fn bundled_applications() -> &'static Vec<Manifest> {
+    static BUNDLED: std::sync::LazyLock<Vec<Manifest>> = std::sync::LazyLock::new(|| {
+        get_all_application_ids()
+            .into_iter()
+            .filter_map(|id| get_application_by_id(&id))
+            .filter(|m| m.inner.do_not_list != Some(true))
+            .collect()
+    });
+    &BUNDLED
 }
 
 /// How well `haystack` matches the lowercased `query` word-by-word.
@@ -300,9 +310,14 @@ enum WordHit {
 
 fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
     let mut best = WordHit::Prefix;
+    // Split once: re-scanning the haystack per query word is quadratic on
+    // word-heavy queries.
+    let haystack_words: Vec<&str> = haystack_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .collect();
     for q in words {
         let mut word_best = WordHit::None;
-        for w in haystack_lower.split(|c: char| !c.is_alphanumeric()) {
+        for w in &haystack_words {
             if w.starts_with(q) {
                 word_best = WordHit::Prefix;
             } else if w.contains(q) {
@@ -390,6 +405,12 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
 /// transpositions as two edits but still ranks them at threshold 0.4 for
 /// short queries like "gmial" → "gmail") of each other.
 fn within_one_edit(a: &str, b: &str) -> bool {
+    // Char counts must be within one; counting without allocating keeps
+    // huge query words from allocating per name word.
+    let (count_a, count_b) = (a.chars().count(), b.chars().count());
+    if count_a.abs_diff(count_b) > 1 {
+        return false;
+    }
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     match a.len().cmp(&b.len()) {
@@ -464,12 +485,21 @@ const PRIVATE_ID_BASE: u64 = 1_000_000;
 /// User-added "private" application manifests persisted as JSON in the
 /// user config dir (port of `manifests/private.ts`).
 ///
+/// The largest `private-manifests.json` this crate reads (8 MiB). Past it the file is treated
+/// like a corrupt one: warned about and ignored, so a hostile file cannot cost memory.
+pub const MAX_PRIVATE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The most records a private-manifest store holds (read or written).
+pub const MAX_PRIVATE_MANIFESTS: usize = 10_000;
+
 /// The TS module hardwires the path to Electron's `userData` dir and a
 /// 1-second memoization cache; the port takes the directory from the
 /// caller ([`PrivateStore::new`] uses `dirs::config_dir`) and always
 /// reads from memory, which the 1s cache only ever approximated.
 pub struct PrivateStore {
-    path: PathBuf,
+    /// `None` for an in-memory store: nothing is written, so a machine with no writable config
+    /// dir can still run the shell (its custom apps live for the session only).
+    path: Option<PathBuf>,
     data: Vec<PrivateManifestRecord>,
     highest_id: u64,
 }
@@ -491,33 +521,64 @@ impl PrivateStore {
         let mut data: Vec<PrivateManifestRecord> = Vec::new();
         let mut highest_id = PRIVATE_ID_BASE;
         if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => match serde_json::from_str::<PrivateFile>(&text) {
-                    Ok(file) => {
-                        for r in file.data {
-                            highest_id = highest_id.max(r.id);
-                            data.push(r);
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.len() > MAX_PRIVATE_MANIFEST_BYTES => {
+                    eprintln!(
+                        "private-manifests.json is {} bytes; starting empty (at most {} is read)",
+                        metadata.len(),
+                        MAX_PRIVATE_MANIFEST_BYTES
+                    );
+                }
+                Ok(_) => match std::fs::read_to_string(&path) {
+                    Ok(text) => match serde_json::from_str::<PrivateFile>(&text) {
+                        Ok(file) if file.data.len() > MAX_PRIVATE_MANIFESTS => {
+                            eprintln!(
+                                "private-manifests.json has {} records; starting empty (at most {} is kept)",
+                                file.data.len(),
+                                MAX_PRIVATE_MANIFESTS
+                            );
                         }
-                    }
-                    Err(e) => {
-                        // TS console.warn's and carries on with [].
-                        eprintln!("private-manifests.json unreadable: {e}");
-                    }
+                        Ok(file) => {
+                            for r in file.data {
+                                highest_id = highest_id.max(r.id);
+                                data.push(r);
+                            }
+                        }
+                        Err(e) => {
+                            // TS console.warn's and carries on with [].
+                            eprintln!("private-manifests.json unreadable: {e}");
+                        }
+                    },
+                    Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
                 },
                 Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
             }
         }
         Ok(Self {
-            path,
+            path: Some(path),
             data,
             highest_id,
         })
     }
 
-    /// Port of `saveNewApplication`: assigns the next id, persists, and
-    /// returns the new id.
-    pub fn save_new_application(&mut self, payload: NewPrivateApplication) -> u64 {
-        self.highest_id += 1;
+    /// A store that never touches the disk: reads nothing, and writes are accepted and forgotten.
+    /// The shell falls back to it when the user's config dir cannot be opened.
+    pub fn in_memory() -> Self {
+        Self {
+            path: None,
+            data: Vec::new(),
+            highest_id: PRIVATE_ID_BASE,
+        }
+    }
+
+    /// Port of `saveNewApplication`: assigns the next id, persists, and returns the new id.
+    ///
+    /// A write failure is returned instead of panicking, and the in-memory list is rolled back:
+    /// what the caller sees stays what the disk holds.
+    pub fn save_new_application(&mut self, payload: NewPrivateApplication) -> std::io::Result<u64> {
+        // TS numbers are floats and cannot overflow; saturate so a hostile
+        // `u64::MAX` id loaded from the file cannot panic on `+ 1`.
+        let id = self.highest_id.saturating_add(1);
         let manifest = PrivateManifestRecord {
             name: payload.name,
             scope: payload.scope,
@@ -529,17 +590,29 @@ impl PrivateStore {
             start_url: payload.start_url,
             category: "Miscellaneous".to_owned(),
             theme_color: payload.theme_color,
-            id: self.highest_id,
+            id,
         };
         self.data.push(manifest);
-        self.persist().expect("write private-manifests.json");
-        self.highest_id
+        if let Err(error) = self.persist() {
+            self.data.pop();
+            return Err(error);
+        }
+        self.highest_id = id;
+        Ok(id)
     }
 
-    /// Port of `deleteManifest` (unknown id is a no-op, like TS).
-    pub fn delete_manifest(&mut self, id: u64) {
-        self.data.retain(|r| r.id != id);
-        self.persist().expect("write private-manifests.json");
+    /// Port of `deleteManifest` (unknown id is a no-op, like TS). A write failure is returned and
+    /// the record is put back.
+    pub fn delete_manifest(&mut self, id: u64) -> std::io::Result<()> {
+        let Some(index) = self.data.iter().position(|record| record.id == id) else {
+            return Ok(());
+        };
+        let removed = self.data.remove(index);
+        if let Err(error) = self.persist() {
+            self.data.insert(index, removed);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Port of `getPrivateManifests` (TS `cleanIcon`: first icon src as
@@ -570,10 +643,51 @@ impl PrivateStore {
             .find(|m| m.id == id.to_string())
     }
 
+    /// Writes through a sibling temp file, fsyncs it, then renames it over the store: a failed or
+    /// killed write leaves the previous file in place, and a failed one removes its temp file.
+    /// (The same pattern `session-store` uses; one small helper each keeps the crates independent.)
     fn persist(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            // In memory: accepted and forgotten.
+            return Ok(());
+        };
         let json = serde_json::to_string(&PrivateFileRef { data: &self.data })?;
-        std::fs::write(&self.path, json)
+        write_atomically(path, json.as_bytes())
     }
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private manifest path has no file name",
+        )
+    })?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = directory.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// The `{ "data": [...] }` envelope `private.ts` writes.
