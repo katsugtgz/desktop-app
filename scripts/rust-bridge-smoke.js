@@ -123,6 +123,21 @@ try { uninstalled = bridge.uninstallApplication(installed.body); }
 catch (e) { uninstallThrew = e; }
 check('uninstallApplication returns null', uninstalled === null && uninstallThrew === null, uninstallThrew && uninstallThrew.message);
 
+// uninstallByManifest: both instances of one manifest removed, another
+// manifest's instance survives (uninstallAllInstances saga semantics)
+const dup1 = bridge.installApplication('station-manifest://14', null, true);
+const dup2 = bridge.installApplication('station-manifest://14', null, true);
+const survivor = bridge.installApplication('station-manifest://157', null, true);
+const byManifest = bridge.uninstallApplicationsByManifest('station-manifest://14');
+check('uninstallApplicationsByManifest returns null', byManifest === null);
+const gone = [dup1.body, dup2.body].map((id) => {
+  try { bridge.uninstallApplication(id); return null; } catch (e) { return String(e.message || e); }
+});
+check('uninstallApplicationsByManifest removes both instances', gone.every((m) => m && /not installed/.test(m)), gone);
+let survivorErr = null;
+try { bridge.uninstallApplication(survivor.body); } catch (e) { survivorErr = e; }
+check('uninstallApplicationsByManifest leaves other manifests alone', survivorErr === null, survivorErr && survivorErr.message);
+
 // missing-param validation survives the bridge
 let threw = null;
 try { bridge.requestPrivateApplication({ name: 'x' }); } catch (e) { threw = e; }

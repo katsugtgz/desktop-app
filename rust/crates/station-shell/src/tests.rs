@@ -40,7 +40,8 @@ fn shell_state() -> ShellState {
 /// A session file path that no other test uses, removed first.
 fn session_path(tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "station-shell-session-{tag}-{}.json",
+        "station-shell-session-{tag}-{}-{}.json",
+        std::process::id(),
         NEXT_STORE.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_file(&path);
@@ -1456,14 +1457,12 @@ fn the_panel_hides_the_page_and_closing_brings_it_back() {
 
 // ---- Routing a page's new window ------------------------------------------------------
 
-/// The request queue is process-global: routing tests take this lock and clear it, so a flood in
-/// one test cannot be routed by another.
-static ROUTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn routing_lock() -> std::sync::MutexGuard<'static, ()> {
-    let guard = ROUTING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// The request queue and the rolling browser budget are process-global, and **every** test's
+/// frame poll drains them: routing tests take the shared test lock (which the poll's own drains
+/// also take) and clear the queue/budget, so a flood in one test cannot be routed, opened or
+/// budgeted by another.
+pub(crate) fn routing_lock() -> crate::test_support::Guard {
+    let guard = crate::test_support::lock();
     let _ = routing::take();
     routing::reset_external_budget();
     guard
@@ -1857,6 +1856,10 @@ fn a_popup_flood_opens_at_most_a_few_browsers_per_frame() {
 
 #[test]
 fn external_opens_have_a_rolling_minute_budget() {
+    // The rolling budget is process-global and another test in this binary spends it
+    // (`the_external_budget_is_global_across_origin_tabs`); serialize the spenders so neither
+    // finds the budget drained by a concurrent run of the other. Same pattern as `tests_pages`.
+    let _bridge = crate::tests_pages::bridge_lock();
     let _routing = routing_lock();
     let recorded = routing::record_external();
     let mut rt = runtime(launched(&session_path("external-budget")), true);
@@ -1903,6 +1906,7 @@ fn external_opens_have_a_rolling_minute_budget() {
 
 #[test]
 fn the_external_budget_is_global_across_origin_tabs() {
+    let _bridge = crate::tests_pages::bridge_lock();
     let _routing = routing_lock();
     let recorded = routing::record_external();
     let mut rt = runtime(launched(&session_path("external-budget-global")), true);

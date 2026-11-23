@@ -1,13 +1,17 @@
 //! Station manifest registry: typed [`BxAppManifest`] model (port of
 //! `packages/app/src/applications/manifest-provider/bxAppManifest.d.ts`),
-//! the bundled definitions from `packages/app/manifests/definitions`
-//! (TS loads them via webpack `require.context`; here they are embedded at
-//! compile time with `include_dir!`), and the
+//! the bundled definitions, copied from `packages/app/manifests/definitions`
+//! into `rust/assets/definitions` (TS loads the originals via webpack
+//! `require.context`; here the copy is embedded at compile time with
+//! `include_dir!`, so the Rust build does not read inside `packages/`), and the
 //! `manifestToMinimalApplication` projection from `packages/app/manifests/index.ts`.
 //!
-//! Not ported in this slice: icons (TS injects them as webpack url-loader
-//! data URLs; no icon embedding here; private manifests keep their icon
-//! URL — that part of `private.ts` has no webpack dependency).
+//! Icons: the TS build injects each bundled icon as a webpack url-loader *data* URL
+//! (`require.context('!url-loader!./icons')` over `packages/app/manifests/icons`). There is no
+//! webpack here, so a bundled `Manifest.icon` carries the manifest's own remote icon URL
+//! (`icons[0].src`, a `https://cdn.filestackcontent.com/…` address) and the shell fetches and
+//! caches it (`station-shell::icons`); private manifests already carry theirs the same way. An
+//! app with no icon keeps an empty `icon` and draws its letter avatar.
 
 use std::path::{Path, PathBuf};
 
@@ -177,15 +181,18 @@ pub enum Preset {
     OnPremise,
 }
 
-/// The bundled application definitions (`packages/app/manifests/definitions`).
-static DEFINITIONS: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../../packages/app/manifests/definitions");
+/// The bundled application definitions, copied byte-for-byte from
+/// `packages/app/manifests/definitions` into `rust/assets/definitions` so the Rust build no longer
+/// reads inside `packages/`. The original stays until the TS tree is deleted; the drift test
+/// below fails if the two diverge.
+static DEFINITIONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../assets/definitions");
 
 /// A manifest with its registry id and resolved icon URL attached
 /// (TS `Manifest = Omit<BxAppManifest, 'icons'> & { id, icon }`).
 ///
-/// The icon stays an empty string in this slice: TS fills it with webpack
-/// url-loader data URLs, which have no Rust-side equivalent yet.
+/// TS's `icon` is a webpack url-loader *data* URL for a bundled icon file; the port keeps the
+/// manifest's own remote icon URL (`icons[0].src`) instead and lets the shell fetch it. Empty
+/// when the manifest lists no icon (the shell then draws the letter avatar).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     #[serde(flatten)]
@@ -246,10 +253,15 @@ pub fn get_all_application_ids() -> Vec<String> {
 pub fn get_application_by_id(id: &str) -> Option<Manifest> {
     let file = DEFINITIONS.get_file(format!("{id}.json"))?;
     let inner: BxAppManifest = serde_json::from_str(file.contents_utf8()?).ok()?;
+    let icon = inner
+        .icons
+        .first()
+        .map(|resource| resource.src.clone())
+        .unwrap_or_default();
     Some(Manifest {
         inner,
         id: id.to_owned(),
-        icon: String::new(),
+        icon,
     })
 }
 
@@ -719,28 +731,51 @@ fn dirs_config_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// One definition file on disk == one parseable embedded manifest.
+    /// The embedded definitions are the copied asset input: 638 JSON files, every one parseable,
+    /// byte-identical to the embedded bytes. That makes the copy the build input (not a name
+    /// coincidence) and fails if either side drifts.
     #[test]
     fn embedded_definitions_match_files_on_disk() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../packages/app/manifests/definitions");
-        let on_disk = std::fs::read_dir(&dir)
-            .unwrap()
+        const EXPECTED_DEFINITIONS: usize = 638;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/definitions");
+        let mut on_disk = 0;
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|why| panic!("{} unreadable: {why}", dir.display()))
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count();
+        {
+            let path = entry.path();
+            if !path.extension().is_some_and(|x| x == "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|why| panic!("{} unreadable: {why}", path.display()));
+            serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap_or_else(|why| panic!("{} is not JSON: {why}", path.display()));
+            on_disk += 1;
+        }
+        assert_eq!(
+            on_disk,
+            EXPECTED_DEFINITIONS,
+            "copied definitions count drifted: {}",
+            dir.display()
+        );
 
         let ids = get_all_application_ids();
         assert_eq!(ids.len(), on_disk, "embedded count != JSON file count");
 
-        let mut parsed = 0;
         for id in &ids {
             let m =
                 get_application_by_id(id).unwrap_or_else(|| panic!("failed to parse {id}.json"));
             assert_eq!(&m.id, id);
-            parsed += 1;
+            let name = format!("{id}.json");
+            let embedded = DEFINITIONS.get_file(name.as_str()).expect("embedded file");
+            let disk = std::fs::read(dir.join(&name)).expect("copied file");
+            assert_eq!(
+                embedded.contents(),
+                disk.as_slice(),
+                "{name} differs between the embedded copy and rust/assets/definitions"
+            );
         }
-        assert_eq!(parsed, on_disk);
     }
 
     /// Every manifest survives a serde JSON round-trip unchanged.
@@ -772,6 +807,28 @@ mod tests {
             get_chrome_extension_id(&mixmax.inner),
             Some("ocpljaamllnldhepankaeljmeeeghnid")
         );
+    }
+
+    /// A bundled manifest's icon is its first icon resource's URL (the TS build embeds the
+    /// same source as a data URL; here it stays remote for the shell to fetch and cache).
+    #[test]
+    fn bundled_manifests_carry_their_icon_url() {
+        let gmail = get_application_by_id("14").unwrap();
+        assert_eq!(
+            gmail.icon,
+            "https://cdn.filestackcontent.com/Yxw83DJdRW2N2PkcDFGA"
+        );
+        let minimal = manifest_to_minimal_application(&gmail);
+        assert_eq!(minimal.icon_url, gmail.icon);
+    }
+
+    /// A manifest without an icon list keeps an empty icon: the shell's letter avatar is the
+    /// fallback, not an error.
+    #[test]
+    fn a_manifest_without_icons_has_an_empty_icon() {
+        let m = get_application_by_id("1").unwrap(); // the App Store itself
+        assert!(m.icon.is_empty(), "1.json declares no icons");
+        assert!(manifest_to_minimal_application(&m).icon_url.is_empty());
     }
 
     #[test]

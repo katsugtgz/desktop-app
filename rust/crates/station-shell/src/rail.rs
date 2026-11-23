@@ -23,7 +23,7 @@ pub fn rail(state: &ShellState, p: Paint) -> El {
         .center()
         .fill(p.t.card);
     for tab in state.tabs() {
-        rows = rows.child(tab_row(tab, state.is_active(&tab.id), p));
+        rows = rows.child(tab_row(tab, state, state.is_active(&tab.id), p));
     }
     rows.child(add_row(p))
         .child(spacer())
@@ -45,13 +45,16 @@ pub fn rail(state: &ShellState, p: Paint) -> El {
         ))
 }
 
-/// One app's row. The glyph stands in for the app's icon until icons are fetched; the accessible
-/// name is the app's, and `checked` says which row the pane shows.
-fn tab_row(tab: &AppTab, active: bool, p: Paint) -> El {
+/// One app's row: the manifest's icon when it has one (fetched once, drawn the instant the
+/// pixels land), the letter avatar otherwise; the accessible name is the app's, and `checked`
+/// says which row the pane shows. A press selects; reordering lives in Settings' My apps card
+/// (D11: Rune gives a rail row no keyboard focus, so the affordance cannot live on the rail).
+fn tab_row(tab: &AppTab, state: &ShellState, active: bool, p: Paint) -> El {
     let id = tab.id.clone();
-    el().key(tab.key())
+    let mut row = el()
+        .key(tab.key())
         .role("tab")
-        .label(tab.label.clone())
+        .label(tab.display_label().to_owned())
         .checked(active)
         .focusable(true)
         .size(ROW, ROW)
@@ -68,12 +71,58 @@ fn tab_row(tab: &AppTab, active: bool, p: Paint) -> El {
             s.select(&id);
         })
         .child(
-            text(glyph(&tab.label))
-                .key(format!("tab-glyph-{}", tab.id))
-                .font(type_::TITLE)
-                .color(if active { p.t.knob } else { p.t.text_secondary })
-                .a11y_hidden(),
-        )
+            crate::icons::avatar(
+                &tab.label,
+                &tab.id,
+                "",
+                28.0,
+                p,
+                state.icon_pixels(&tab.icon),
+            )
+            .key(format!("tab-icon-{}", tab.id)),
+        );
+    if let Some(badge) = &tab.badge {
+        row = row.child(badge_view(&tab.id, badge, p));
+    }
+    row
+}
+
+/// The page's `browserx-badge`, drawn over the row's icon corner: a count for a numeric badge
+/// (`999+` past the cap; the value itself stays the page's), a dot for any text badge — the
+/// `tab-model::Badge` split, matching the TS `UPDATE_BADGE` normalization and its dot rendering.
+fn badge_view(id: &str, badge: &tab_model::Badge, p: Paint) -> El {
+    let fill = rune::color::hex("#EF5757").unwrap_or(p.t.press);
+    match badge {
+        tab_model::Badge::Number(count) => {
+            let label = if *count > 999 {
+                "999+".to_owned()
+            } else {
+                count.to_string()
+            };
+            el().key(format!("tab-badge-{id}"))
+                .absolute(17.0, 0.0)
+                .w(23.0)
+                .h(16.0)
+                .center()
+                .radius(8.0)
+                .fill(fill)
+                .a11y_hidden()
+                .child(
+                    text(label)
+                        .key(format!("tab-badge-count-{id}"))
+                        .font(type_::MONO_CAPTION)
+                        .color(rune::color::hex("#FFFFFF").unwrap_or(p.t.text))
+                        .a11y_hidden(),
+                )
+        }
+        tab_model::Badge::Text(_) => el()
+            .key(format!("tab-badge-{id}"))
+            .absolute(27.0, 3.0)
+            .size(9.0, 9.0)
+            .radius(4.5)
+            .fill(fill)
+            .a11y_hidden(),
+    }
 }
 
 /// The "+" row: adding an app starts in the app store, which lists what can be added.
@@ -151,13 +200,4 @@ fn circle_points(from: f32, to: f32, steps: usize, radius: f32) -> Vec<[f32; 2]>
             [centre + radius * angle.cos(), centre + radius * angle.sin()]
         })
         .collect()
-}
-
-/// The first letter of an app's name, the stand-in for its icon.
-fn glyph(label: &str) -> String {
-    label
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default()
 }

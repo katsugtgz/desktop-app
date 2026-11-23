@@ -11,9 +11,8 @@
 use crate::shell::Paint;
 use crate::state::{ShellState, StoreSection, TileAction};
 use manifest_registry::MinimalApplication;
-use rune::color;
 use rune::tok::{self, radius, space, type_};
-use rune::{col, edit_access, el, row, text, text_input, Color, El, ScrollSpec};
+use rune::{col, edit_access, el, row, text, text_input, El, ScrollSpec};
 
 /// The store's secondary sidebar, in points: Station's own is 220 pt wide.
 pub const SIDEBAR_WIDTH: f32 = 220.0;
@@ -276,7 +275,6 @@ fn grid(apps: &[MinimalApplication], state: &ShellState, p: Paint) -> El {
 
 fn tile(app: &MinimalApplication, state: &ShellState, p: Paint) -> El {
     let installed = state.is_installed(&app.bx_app_manifest_url);
-    let tint = tint_for(app, p);
     let pressed = app.clone();
     let mut tile = el()
         .key(format!("store-tile-{}", app.id))
@@ -295,7 +293,17 @@ fn tile(app: &MinimalApplication, state: &ShellState, p: Paint) -> El {
                 crate::webview::close_tab(&application_id);
             }
         })
-        .child(avatar(&app.name, tint, p));
+        .child(
+            crate::icons::avatar(
+                &app.name,
+                &app.id,
+                &app.theme_color,
+                28.0,
+                p,
+                state.icon_pixels(&app.icon_url),
+            )
+            .key(format!("store-icon-{}", app.id)),
+        );
     if installed {
         tile = tile.child(
             col()
@@ -324,47 +332,6 @@ fn tile(app: &MinimalApplication, state: &ShellState, p: Paint) -> El {
         );
     }
     tile
-}
-
-fn avatar(name: &str, tint: Color, p: Paint) -> El {
-    let letter = name
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    el().size(28.0, 28.0)
-        .radius(14.0)
-        .center()
-        .fill(tint)
-        .child(
-            text(letter)
-                .font(type_::LABEL)
-                .color(ink_on(tint, p))
-                .a11y_hidden(),
-        )
-        .a11y_hidden()
-}
-
-/// The avatar colour: the manifest's `theme_color` when it parses, else one of Rune's accents
-/// picked from the app id, so every tile has a stable, palette-derived colour.
-fn tint_for(app: &MinimalApplication, p: Paint) -> Color {
-    if let Some(tint) = color::hex(&app.theme_color) {
-        return tint;
-    }
-    let index =
-        app.id.bytes().fold(0usize, |sum, byte| sum + byte as usize) % tok::ACCENT_NAMES.len();
-    tok::accent(index, p.dark)
-}
-
-/// A readable foreground for text on `tint`: the appearance's own foregrounds, chosen by the
-/// tint's perceived lightness.
-fn ink_on(tint: Color, p: Paint) -> Color {
-    let luminance = 0.2126 * tint.r + 0.7152 * tint.g + 0.0722 * tint.b;
-    if luminance > 0.4 {
-        p.t.bg
-    } else {
-        tok::theme(!p.dark).knob
-    }
 }
 
 /// A stable element key from a title: lowercase ASCII alphanumerics, runs joined by dashes.

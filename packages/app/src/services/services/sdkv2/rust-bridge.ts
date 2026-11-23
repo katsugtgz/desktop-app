@@ -27,6 +27,7 @@ const BRIDGED_CHANNELS = [
   ['GetPrivateApplications', 'getPrivateApplications', []],
   ['InstallApplication', 'installApplication', ['manifestURL', 'context', 'inBackground']],
   ['UninstallApplication', 'uninstallApplication', ['applicationId']],
+  ['UninstallApplications', 'uninstallApplicationsByManifest', ['manifestURL']],
   ['RequestPrivateApplication', 'requestPrivateApplication', null],
 ] as const;
 

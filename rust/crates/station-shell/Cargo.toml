@@ -8,9 +8,19 @@ appstore-service = { path = "../appstore-service" }
 dirs = "7"
 manifest-registry = { path = "../manifest-registry" }
 notification-center = { path = "../notification-center" }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 session-store = { path = "../session-store" }
+tab-model = { path = "../tab-model" }
 url-router = { path = "../url-router" }
+# Icons: the fetcher runs on one worker thread; `rustls` + webpki roots keeps TLS off the OS
+# store and adds no `-sys` build (the default `tls` feature is what this crate enables anyway).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+# The disk cache names each icon by the SHA-256 of its URL.
+sha2 = "0.10"
+# Icon decode: the same crate and version rune decodes with (`ImageCache::load` takes bytes, but
+# the shell needs the width/height cap *before* mips are built, so it decodes itself).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # `tooling` keeps Rune's headless flags (`--snap`, `--tree`, …) in release builds: the shell's
 # snapshots are how its views are checked without a window, and Rune leaves them out of release
 # binaries unless asked.
@@ -21,6 +31,18 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "10a39584cc1ff739477be
 # keeps wry's GTK/webkit dependencies out of non-Windows resolution.
 [target.'cfg(target_os = "windows")'.dependencies]
 # `ShellExecuteW` opens the default browser with a single string: no command interpreter sees a
-# page-controlled URL (the old `cmd /C start` did).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# page-controlled URL (the old `cmd /C start` did). `Win32_UI_HiDpi` is `GetDpiForWindow`: the
+# window's real DPI, so a monitor change re-scales the pages (slice 13).
+# Single-instance (slice 14): `Win32_System_Threading` is `CreateMutexW` (the per-session lock)
+# plus `GetCurrentThreadId`/`AttachThreadInput`/`GetWindowThreadProcessId` for the focus
+# hand-off; `GetForegroundWindow` itself is in the already-present
+# `Win32_UI_WindowsAndMessaging`.
+# Launch at login (slice 18): `Win32_System_Registry` is the `HKCU\…\Run` value read/written
+# with `RegGetValueW`/`RegCreateKeyExW`/`RegSetValueExW`/`RegDeleteValueW`; no elevation.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
 wry = { version = "0.57", default-features = false }
+
+# Windows only: compiles `station.rc` (the exe's icon resource) with `rc.exe`/`windres` at
+# build time, so Explorer and the taskbar show the real icon without any runtime work.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.12"

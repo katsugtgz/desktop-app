@@ -6,16 +6,21 @@
 //! re-query: a rail click, a store tile and the search field all write through the methods here.
 //! Nothing platform-bound lives in this type — the web view host is `webview`'s, keyed by tab id.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use appstore_service::{
     get_all_categories, get_applications_by_category, get_most_popular_apps, search_applications,
-    ApplicationService, InstallOptions, InstalledApplication, PopularApps,
+    write_commands::ApplicationConfigData, ApplicationService, InstallOptions,
+    InstalledApplication, PopularApps,
 };
 use manifest_registry::{manifest_to_minimal_application, Manifest, MinimalApplication};
 use notification_center::{NotificationAction, NotificationCenter};
 use rune::TextEdit;
-use session_store::{SessionState, SessionStore, ThemePreference, WindowState};
+use session_store::{
+    AppConfigEntry, Identity, SessionState, SessionStore, ThemePreference, WindowState,
+};
+use tab_model::{Badge, TabAction, TabModel};
 use url_router::{InstalledApp, OpenTab};
 
 use crate::session;
@@ -71,14 +76,37 @@ pub enum TabKind {
     Web,
 }
 
-/// One app in the rail: the id keys and the web view host use, the label the user reads, and the
-/// URL its pane shows.
+/// One app in the rail: the id keys and the web view host use, the label the user reads, the
+/// URL its pane shows, and the manifest icon it draws.
+///
+/// The page may override two presentation facts (slice 20): its own `document.title`
+/// ([`AppTab::page_title`]) and a `browserx-badge` meta ([`AppTab::badge`]). Both live only in
+/// memory — the session document stores installed applications and URLs, never page labels — and
+/// the manifest `label` is the fallback the moment the page clears either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppTab {
     pub id: String,
+    /// The manifest's name: what the tab shows until (and whenever it is not overridden by) the
+    /// page's own title.
     pub label: String,
     pub url: String,
     pub kind: TabKind,
+    /// The manifest's icon URL (`MinimalApplication::icon_url`); empty draws the letter avatar.
+    pub icon: String,
+    /// The manifest has multi-instance presets, so Settings offers a configuration editor.
+    pub configurable: bool,
+    /// The page's own `document.title`, trimmed and capped by the bridge; `None` means the page
+    /// never set one (or cleared it) and the manifest label shows.
+    pub page_title: Option<String>,
+    /// The page's `browserx-badge` meta, normalized with [`tab_model::Badge`]'s TS rule; `None`
+    /// means no badge (missing meta or an empty one).
+    pub badge: Option<Badge>,
+    /// The manifest's `bx_override_user_agent`: the UA Electron's `<webview useragent>`
+    /// attribute gave this app's page. `None` means the session's default UA.
+    pub user_agent: Option<String>,
+    /// The manifest's `bx_use_default_session`: Electron gave the app no partition (the default
+    /// session) instead of `persist:<applicationId>`.
+    pub use_default_session: bool,
 }
 
 impl AppTab {
@@ -89,6 +117,12 @@ impl AppTab {
             label: "App Store".to_owned(),
             url: APP_STORE_URL.to_owned(),
             kind: TabKind::Store,
+            icon: String::new(),
+            configurable: false,
+            page_title: None,
+            badge: None,
+            user_agent: None,
+            use_default_session: false,
         }
     }
 
@@ -99,12 +133,51 @@ impl AppTab {
             label: label.into(),
             url: url.into(),
             kind: TabKind::Web,
+            icon: String::new(),
+            configurable: false,
+            page_title: None,
+            badge: None,
+            user_agent: None,
+            use_default_session: false,
+        }
+    }
+
+    /// `web` with the manifest icon set: what `rebuild_tabs` builds for an installed app.
+    pub fn web_with_icon(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        url: impl Into<String>,
+        icon: impl Into<String>,
+    ) -> Self {
+        Self {
+            icon: icon.into(),
+            ..Self::web(id, label, url)
+        }
+    }
+
+    /// `web_with_icon` with the configuration flag: the rail's real builder.
+    pub fn web_full(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        url: impl Into<String>,
+        icon: impl Into<String>,
+        configurable: bool,
+    ) -> Self {
+        Self {
+            configurable,
+            ..Self::web_with_icon(id, label, url, icon)
         }
     }
 
     /// The element key of this app's rail row. Unique because tab ids are.
     pub fn key(&self) -> String {
         format!("tab-{}", self.id)
+    }
+
+    /// The label the UI shows: the page's own title once it set one, else the manifest name.
+    /// The manifest name returns the moment the page clears its title (`page_title` is `None`).
+    pub fn display_label(&self) -> &str {
+        self.page_title.as_deref().unwrap_or(&self.label)
     }
 
     /// Whether Rune draws this tab's content. The App Store is the one such page today; the URL
@@ -192,6 +265,12 @@ pub struct ShellState {
     search: TextEdit,
     results: Vec<MinimalApplication>,
     theme: ThemePreference,
+    /// The login item's last known registry state (Windows `HKCU\…\Run\Station`): refreshed
+    /// from the registry on a real launch, written with the session after a successful toggle.
+    start_at_login: bool,
+    /// Why the login item could not be read or written, for the Settings row. Cleared by the
+    /// next successful read; a failed write keeps the last known truth, so no toggle lies.
+    start_at_login_error: Option<String>,
     surface: Surface,
     page_error: Option<PageError>,
     /// Failed writes since the last success: logged at most every [`SAVE_LOG_EVERY_S`].
@@ -199,6 +278,10 @@ pub struct ShellState {
     /// The clock time of the last save-failure log line.
     save_logged_at: f64,
     notifications: NotificationCenter,
+    /// The accounts the session stores (slice 17): what Settings lists and the Configure
+    /// chooser offers. Loaded at launch and written back unchanged — nothing in this slice
+    /// creates one (sign-in is a later slice), and no tokens are part of the shape.
+    identities: BTreeMap<String, Identity>,
     /// The session file, when this shell persists. `None` in tests that build a state directly:
     /// they never touch a session path.
     session: Option<PathBuf>,
@@ -207,6 +290,50 @@ pub struct ShellState {
     /// Set when the session on disk could not be read or replayed: the file is not overwritten
     /// until the user acts (a selection, an install, an uninstall).
     save_blocked: bool,
+    /// The user's rail order (slice 11): application ids, newest install last, the App Store
+    /// excluded (its row is always first and never moves). The rail builds from it; `dock`
+    /// stays the service's membership fact. Empty on a fresh shell until the first user
+    /// action writes it.
+    rail_order: Vec<String>,
+    /// The manifest icons: handles per URL, fetched once per run on the icons worker, cached on
+    /// disk. Views read `icon_pixels`; nothing in the state touches the network itself.
+    icons: crate::icons::IconStore,
+    /// The configuration editor's draft, while Settings shows an app's editor (`None` otherwise;
+    /// leaving Settings drops it). `TextEdit` is the field widget; its text is the value.
+    config_draft: Option<ConfigDraft>,
+}
+
+/// The settings editor's draft for one installed application.
+#[derive(Debug, PartialEq)]
+pub struct ConfigDraft {
+    /// The application being edited.
+    pub application_id: String,
+    /// The labelled field (identity id or custom URL, per the manifest's presets).
+    pub field: ConfigField,
+    pub edit: TextEdit,
+}
+
+/// The one configuration field a manifest's presets consume — what the editor shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigField {
+    /// `google-account` presets: an identity id string. The shell cannot obtain one (no OAuth),
+    /// so the editor says so instead of pretending.
+    Identity,
+    /// `on-premise` presets: the instance's full URL.
+    CustomUrl,
+    /// `subdomain` presets: the instance's subdomain.
+    Subdomain,
+}
+
+impl ConfigField {
+    /// The editor row's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ConfigField::Identity => "Account",
+            ConfigField::CustomUrl => "Server URL",
+            ConfigField::Subdomain => "Domain",
+        }
+    }
 }
 
 impl ShellState {
@@ -245,14 +372,20 @@ impl ShellState {
             search: TextEdit::new(""),
             results: Vec::new(),
             theme: ThemePreference::System,
+            start_at_login: false,
+            start_at_login_error: None,
             surface: Surface::Apps,
             page_error: None,
             save_failures: 0,
             save_logged_at: 0.0,
             notifications: NotificationCenter::new(),
+            identities: BTreeMap::new(),
             session: None,
             window: WindowState::default(),
             save_blocked: false,
+            rail_order: Vec::new(),
+            icons: crate::icons::IconStore::new(),
+            config_draft: None,
         };
         state.rebuild_tabs();
         state
@@ -261,7 +394,18 @@ impl ShellState {
     /// The shell a launch starts in: the session at [`session::path`] restored over the user's
     /// private manifest store.
     pub fn launch() -> Self {
-        Self::launch_in(launch_service(), &session::path())
+        let state = Self::launch_in(launch_service(), &session::path());
+        // The registry is the login item's truth: the session's value is only what this shell
+        // last saw. Tests build their state through `launch_in` and use a fake login item.
+        #[cfg(not(test))]
+        let state = {
+            let mut state = state;
+            if crate::autolaunch::supported() {
+                state.refresh_start_at_login();
+            }
+            state
+        };
+        state
     }
 
     /// The session at `path` restored over `service`: what `launch` does, with the store given.
@@ -283,6 +427,8 @@ impl ShellState {
         let active = stored.active_application.take();
         let window = std::mem::take(&mut stored.window);
         let theme = stored.theme;
+        let rail_order = std::mem::take(&mut stored.rail_order);
+        let identities = std::mem::take(&mut stored.identities);
         let mut service = service;
         let mut replayed = true;
         if !(stored.installed.is_empty() && stored.dock.is_empty() && stored.tabs.is_empty()) {
@@ -298,7 +444,20 @@ impl ShellState {
         state.session = Some(path.to_owned());
         state.window = window;
         state.theme = theme;
+        state.start_at_login = stored.start_at_login;
+        state.identities = identities;
         state.save_blocked = !readable || !replayed;
+        // The order is the user's when it names exactly the docked applications (the document's
+        // own validation guarantees that shape); anything else falls back to install order, and
+        // the next user action heals the document.
+        let docked: std::collections::HashSet<&str> =
+            state.store.dock().iter().map(|id| id.as_str()).collect();
+        let matches = rail_order.len() == docked.len()
+            && rail_order.iter().all(|id| docked.contains(id.as_str()));
+        if matches {
+            state.rail_order = rail_order;
+            state.rebuild_tabs();
+        }
         if let Some(active) = active {
             // A session naming an application it no longer has falls back to the App Store.
             state.set_active(&active);
@@ -306,23 +465,122 @@ impl ShellState {
         state
     }
 
-    /// The rail: the App Store, then every docked application in dock order.
+    /// The rail: the App Store, then every docked application in the user's order —
+    /// `rail_order` when it names the docked set exactly (the slice-11 authority), install
+    /// order otherwise (a fresh shell, a healed document). Install appends, uninstall drops:
+    /// `reconcile_rail_order` keeps the two views in step first.
     fn rebuild_tabs(&mut self) {
+        self.reconcile_rail_order();
+        // Page-derived presentation (slice 20) survives a rebuild (an install, a config change,
+        // a reorder): it is keyed by tab id, and a tab that leaves drops its entry with it.
+        let previous: std::collections::HashMap<String, (Option<String>, Option<Badge>)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id.clone(), (tab.page_title.clone(), tab.badge.clone())))
+            .collect();
+        // Ids first: the service borrows end where the per-tab resolution starts.
+        let docked: Vec<String> = self.rail_order.clone();
         let mut tabs = vec![AppTab::store()];
-        for id in self.store.dock() {
-            let Some(application) = self.store.installed_applications().get(id) else {
+        for id in docked {
+            let Some(application) = self.store.installed_applications().get(&id) else {
                 continue;
             };
-            tabs.push(AppTab::web(
-                application.application_id.clone(),
-                self.label_for(&application.manifest_url, id),
-                application.home_tab_url.clone().unwrap_or_default(),
-            ));
+            // The URL the app's stored configuration resolves to (the install's own decision);
+            // a record whose manifest is gone keeps its home tab's URL.
+            let url = self
+                .store
+                .resolve_start_url(&application.manifest_url, &id, &application.config_data)
+                .or_else(|| application.home_tab_url.clone())
+                .unwrap_or_default();
+            // The manifest's icon rides the tab so a rail row draws it without re-querying; the
+            // presets decide whether Settings offers a configuration editor.
+            let manifest = self.store.get_manifest_by_url(&application.manifest_url);
+            let icon = manifest
+                .as_ref()
+                .map(|manifest| manifest.icon.clone())
+                .unwrap_or_default();
+            let configurable = manifest
+                .as_ref()
+                .map(|manifest| !manifest_registry::get_presets(&manifest.inner).is_empty())
+                .unwrap_or(false);
+            // The Electron session layer's two per-app inputs: a manifest UA override (the
+            // `<webview useragent>` attribute) and whether the app shared the default session
+            // instead of `persist:<applicationId>`.
+            let user_agent = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.inner.bx_override_user_agent.clone());
+            let use_default_session = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.inner.bx_use_default_session)
+                .unwrap_or(false);
+            let mut tab = AppTab {
+                user_agent,
+                use_default_session,
+                ..AppTab::web_full(
+                    application.application_id.clone(),
+                    self.label_for(&application.manifest_url, &id),
+                    url,
+                    icon,
+                    configurable,
+                )
+            };
+            if let Some((title, badge)) = previous.get(&tab.id) {
+                tab.page_title = title.clone();
+                tab.badge = badge.clone();
+            }
+            tabs.push(tab);
         }
         if !tabs.iter().any(|tab| tab.id == self.active) {
             self.active = APP_STORE_ID.to_owned();
         }
         self.tabs = tabs;
+    }
+
+    /// Keeps `rail_order` in step with the dock before the rail builds from it: an installed
+    /// (docked) application the order does not name is appended (install), an order entry the
+    /// dock no longer has is dropped (uninstall). Dock-less installs (`bx_no_dock`) never join.
+    /// This is the one writer of membership on the order; the user's reordering never changes
+    /// the set, only the sequence.
+    fn reconcile_rail_order(&mut self) {
+        let docked: std::collections::HashSet<String> = self.store.dock().iter().cloned().collect();
+        self.rail_order.retain(|id| docked.contains(id));
+        for id in self.store.dock() {
+            if !self.rail_order.contains(id) {
+                self.rail_order.push(id.clone());
+            }
+        }
+    }
+
+    /// Moves `application_id` one step through the rail: earlier when `up`, later otherwise.
+    /// The App Store row is the rail's first and never moves, so the first app cannot go up and
+    /// the last cannot go down. A move is a user action: the session is written at once (D7).
+    /// False (and no write) when the application is unknown, is the store row, or sits at the
+    /// edge. The active tab is untouched: reordering changes where a row sits, not what shows.
+    pub fn move_rail_row(&mut self, application_id: &str, up: bool) -> bool {
+        let Some(index) = self.rail_order.iter().position(|id| id == application_id) else {
+            return false;
+        };
+        // The store row is above every app row (it lives in `self.tabs`, not in the order): the
+        // first app cannot move up. The last app cannot move down.
+        let target = if up {
+            index.checked_sub(1)
+        } else {
+            Some(index + 1)
+        };
+        let Some(target) = target else { return false };
+        if target >= self.rail_order.len() {
+            return false;
+        }
+        self.rail_order.swap(index, target);
+        self.rebuild_tabs();
+        self.persist();
+        true
+    }
+
+    /// The rail order as it is now (tests: the drawn rail is the one view that shows it).
+    #[cfg(test)]
+    pub fn rail_order(&self) -> &[String] {
+        &self.rail_order
     }
 
     /// An installed application's name, from its manifest; the id when the manifest is gone (the
@@ -434,6 +692,83 @@ impl ShellState {
         self.installed_application_id(manifest_url).is_some()
     }
 
+    /// An installed application's stored configuration (empty when not configured, or when the
+    /// id is unknown).
+    pub fn config_of(&self, application_id: &str) -> AppConfigEntry {
+        let Some(installed) = self.store.installed_applications().get(application_id) else {
+            return AppConfigEntry::default();
+        };
+        AppConfigEntry {
+            identity_id: installed.config_data.identity_id.clone(),
+            subdomain: installed.config_data.subdomain.clone(),
+            custom_url: installed.config_data.custom_url.clone(),
+        }
+    }
+
+    /// Saves an installed application's configuration: the service decides what its presets
+    /// keep, the tab's URL is re-resolved from it, and the session is written at once (D7).
+    /// False when the id is unknown, the manifest is gone, or the value is not usable (over the
+    /// document cap) — a refused value changes nothing, in memory or on disk.
+    pub fn set_app_config(&mut self, application_id: &str, config: AppConfigEntry) -> bool {
+        // The cap is checked on the value as given: `trimmed` would silently cut a hostile one
+        // to size, and the document's own rule is refuse, not truncate.
+        if config
+            .values()
+            .into_iter()
+            .flatten()
+            .any(|value| value.chars().count() > session_store::MAX_CONFIG_VALUE_CHARS)
+        {
+            return false;
+        }
+        let config = trimmed(config);
+        if self
+            .store
+            .set_config_data(application_id, &to_service_config(&config))
+            .is_err()
+        {
+            return false;
+        }
+        self.re_resolve_tab_url(application_id);
+        self.persist();
+        true
+    }
+
+    /// The accounts the session stores, keyed by `identityId` (slice 17). Nothing creates one
+    /// yet — sign-in lands in a later slice — so Settings shows its empty state and the Configure
+    /// chooser offers only what is already here.
+    pub fn identities(&self) -> &BTreeMap<String, Identity> {
+        &self.identities
+    }
+
+    /// Removes an installed application's configuration: the tab reverts to the manifest's own
+    /// start URL and the session is written at once. False when there was nothing to clear.
+    pub fn clear_app_config(&mut self, application_id: &str) -> bool {
+        match self.store.clear_config_data(application_id) {
+            Ok(true) => {}
+            _ => return false,
+        }
+        self.re_resolve_tab_url(application_id);
+        self.persist();
+        true
+    }
+
+    /// Re-points a configured app's rail tab at the URL its configuration now resolves to. The
+    /// rail is rebuilt from the service's records, so install and launch take the same path.
+    /// A missing manifest (uninstalled mid-edit, a private manifest deleted underneath the
+    /// session) keeps the tab's last URL: the record's home tab is the fallback.
+    fn re_resolve_tab_url(&mut self, _application_id: &str) {
+        self.rebuild_tabs();
+    }
+
+    /// A rail tab's current URL, by tab id (tests and the settings surface use it to see where a
+    /// configured app points now).
+    pub fn tab_url(&self, application_id: &str) -> Option<&str> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == application_id)
+            .map(|tab| tab.url.as_str())
+    }
+
     fn installed_application_id(&self, manifest_url: &str) -> Option<String> {
         self.store
             .installed_applications()
@@ -478,6 +813,97 @@ impl ShellState {
         &self.results
     }
 
+    /// Queues the fetch for every app the shell can draw an icon for (the rail's tabs and the
+    /// store's lists). Called from the frame poll — the view never mutates state, so the
+    /// asking happens here; once per URL per run.
+    pub fn prefetch_icons(&mut self) {
+        for tab in &self.tabs {
+            self.icons.pixels(&tab.icon);
+        }
+        // The notification panel's rows, only while it is the surface (slice 16). The panel
+        // module owns which rows are drawn and the per-frame bound
+        // (`MAX_NOTIFICATION_ICON_URLS`); this is the one ask path, the store dedupes.
+        //
+        // Before the store's lists: [`crate::icons::MAX_INFLIGHT`] is a drop-not-defer queue,
+        // and a cold store asks for every listable app's icon at once. What the user is looking
+        // at (the panel) must not lose its asks to off-screen store tiles; the store's own
+        // bound already drops its tail on a cold frame and asks it on the next poll.
+        if self.surface == Surface::Notifications {
+            for url in crate::notifications::icon_urls(&self.notifications) {
+                self.icons.pixels(&url);
+            }
+        }
+        for url in self.store_list_icon_urls() {
+            self.icons.pixels(&url);
+        }
+    }
+
+    /// The icon URLs the store's cached lists and current results draw.
+    fn store_list_icon_urls(&self) -> Vec<String> {
+        let mut urls: Vec<String> = Vec::new();
+        urls.extend(
+            self.popular
+                .cream_of_the_crop_apps
+                .iter()
+                .map(|a| a.icon_url.clone()),
+        );
+        urls.extend(self.popular.runner_ups.iter().map(|a| a.icon_url.clone()));
+        urls.extend(self.popular.noteworthy.iter().map(|a| a.icon_url.clone()));
+        for (_, category) in &self.categories {
+            urls.extend(category.iter().map(|a| a.icon_url.clone()));
+        }
+        urls.extend(self.custom.iter().map(|a| a.icon_url.clone()));
+        urls.extend(self.results.iter().map(|a| a.icon_url.clone()));
+        urls
+    }
+
+    /// The pixels drawing `url`'s icon, or `None` — no icon, a URL the shell refuses, or a
+    /// fetch that has not landed (or failed): the view draws its letter avatar.
+    pub fn icon_pixels(&self, url: &str) -> Option<&rune::Pixels> {
+        self.icons.pixels_read(url)
+    }
+
+    /// The letter-avatar identity for `application_id` (the notification panel's row icons):
+    /// the manifest's name and `theme_color`, or the id with no tint when the application or
+    /// its manifest is gone — `icons::avatar` then derives the accent from the id, exactly as
+    /// the rail's rows and the store's tiles do.
+    pub fn avatar_identity(&self, application_id: &str) -> (String, String) {
+        let Some(installed) = self.store.installed_applications().get(application_id) else {
+            return (application_id.to_owned(), String::new());
+        };
+        let Some(manifest) = self.store.get_manifest_by_url(&installed.manifest_url) else {
+            return (application_id.to_owned(), String::new());
+        };
+        let name = manifest
+            .inner
+            .name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| application_id.to_owned());
+        (name, manifest.inner.theme_color.clone().unwrap_or_default())
+    }
+
+    /// Replaces the icons store wholesale (tests: a store with a temp cache dir or canned
+    /// fetch responses).
+    #[cfg(test)]
+    pub fn set_icons(&mut self, icons: crate::icons::IconStore) {
+        self.icons = icons;
+    }
+
+    /// Starts the icons worker: `AppSpec::setup`, once, with Rune's waker and the HTTP fetcher.
+    pub fn start_icons(&mut self, waker: rune::Waker) {
+        self.icons.start(Box::new(crate::icons::HttpFetcher), waker);
+    }
+
+    /// Drains finished icon jobs into their handles; true when pixels changed (the poll's
+    /// "redraw" for the views that draw icons).
+    pub fn drain_icons(&mut self) -> bool {
+        if !self.icons.has_jobs() {
+            return false;
+        }
+        self.icons.drain()
+    }
+
     pub fn popular(&self) -> &PopularApps {
         &self.popular
     }
@@ -509,6 +935,44 @@ impl ShellState {
             }
             None => false,
         }
+    }
+
+    /// A page's own `document.title` for its tab (slice 20). The bridge already trimmed and
+    /// bounded it; an empty title clears the override so the manifest label returns. True when
+    /// the drawn label changed. Never persisted: the session document stores no page titles.
+    pub fn set_page_title(&mut self, tab_id: &str, title: &str) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id && tab.kind == TabKind::Web)
+        else {
+            return false;
+        };
+        let next = (!title.is_empty()).then(|| title.to_owned());
+        if tab.page_title == next {
+            return false;
+        }
+        tab.page_title = next;
+        true
+    }
+
+    /// A page's `browserx-badge` meta (`Some`) or its removal (`None`) for its tab. The raw
+    /// string is normalized by `tab-model`'s TS rule (a base-10 integer prefix is a count,
+    /// anything else is text). True when the drawn badge changed. Never persisted.
+    pub fn set_page_badge(&mut self, tab_id: &str, badge: Option<&str>) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id && tab.kind == TabKind::Web)
+        else {
+            return false;
+        };
+        let next = badge.and_then(normalize_page_badge);
+        if tab.badge == next {
+            return false;
+        }
+        tab.badge = next;
+        true
     }
 
     /// The installed applications in `url-router`'s shape: manifest scope, extended scopes, and
@@ -551,6 +1015,88 @@ impl ShellState {
             .collect()
     }
 
+    /// The configuration editor's draft, while Settings shows one.
+    pub fn config_draft(&self) -> Option<&ConfigDraft> {
+        self.config_draft.as_ref()
+    }
+
+    /// The draft's field, for `text_input`'s accessor.
+    pub fn config_draft_mut(&mut self) -> Option<&mut ConfigDraft> {
+        self.config_draft.as_mut()
+    }
+
+    /// Opens the editor for an installed application: the one field its manifest's presets
+    /// consume, prefilled with the stored value. A google-account preset is shown honestly as
+    /// unavailable (the shell has no OAuth), with no stub field.
+    ///
+    /// False when the id is unknown or the manifest is gone — no editor.
+    pub fn open_config_editor(&mut self, application_id: &str) -> bool {
+        let Some(installed) = self.store.installed_applications().get(application_id) else {
+            return false;
+        };
+        let Some(manifest) = self.store.get_manifest_by_url(&installed.manifest_url) else {
+            return false;
+        };
+        let Some(field) = config_field_for(&manifest.inner) else {
+            return false;
+        };
+        let stored = self.config_of(application_id);
+        let text = match field {
+            ConfigField::Identity => stored.identity_id.clone(),
+            ConfigField::CustomUrl => stored.custom_url.clone(),
+            ConfigField::Subdomain => stored.subdomain.clone(),
+        }
+        .unwrap_or_default();
+        self.config_draft = Some(ConfigDraft {
+            application_id: application_id.to_owned(),
+            field,
+            edit: TextEdit::new(text),
+        });
+        true
+    }
+
+    /// Drops the draft (Back, Escape, Open, Uninstall) without writing anything.
+    pub fn close_config_editor(&mut self) {
+        self.config_draft = None;
+    }
+
+    /// Saves the draft through [`ShellState::set_app_config`] and closes the editor.
+    pub fn save_config_draft(&mut self) {
+        let Some(draft) = &self.config_draft else {
+            return;
+        };
+        let application_id = draft.application_id.clone();
+        let field = draft.field;
+        let text = draft.edit.text.trim().to_owned();
+        let entry = match field {
+            ConfigField::Identity => AppConfigEntry {
+                identity_id: (!text.is_empty()).then_some(text),
+                ..AppConfigEntry::default()
+            },
+            ConfigField::CustomUrl => AppConfigEntry {
+                custom_url: (!text.is_empty()).then_some(text),
+                ..AppConfigEntry::default()
+            },
+            ConfigField::Subdomain => AppConfigEntry {
+                subdomain: (!text.is_empty()).then_some(text),
+                ..AppConfigEntry::default()
+            },
+        };
+        self.set_app_config(&application_id, entry);
+        self.config_draft = None;
+    }
+
+    /// Clears an installed application's configuration and closes the editor. True when
+    /// something was configured (the session moved).
+    pub fn clear_config_draft(&mut self) -> bool {
+        let Some(draft) = &self.config_draft else {
+            return false;
+        };
+        let application_id = draft.application_id.clone();
+        self.config_draft = None;
+        self.clear_app_config(&application_id)
+    }
+
     /// Failed writes since the last success (tests observe the retry/log throttling).
     #[cfg(test)]
     pub fn save_failures(&self) -> u32 {
@@ -576,6 +1122,67 @@ impl ShellState {
         self.persist();
     }
 
+    /// The login item as last read/written (the registry's truth on Windows).
+    pub fn start_at_login(&self) -> bool {
+        self.start_at_login
+    }
+
+    /// Why the last login-item read or write failed, if it did; Settings shows this instead of
+    /// pretending the toggle worked.
+    pub fn start_at_login_error(&self) -> Option<&str> {
+        self.start_at_login_error.as_deref()
+    }
+
+    /// Re-reads the login item so the toggle reflects the registry rather than the session's
+    /// last value. Called by [`Self::launch`] on Windows.
+    #[cfg_attr(test, allow(dead_code))]
+    fn refresh_start_at_login(&mut self) {
+        self.refresh_start_at_login_with(&crate::autolaunch::SystemLoginItem);
+    }
+
+    /// [`Self::refresh_start_at_login`] against any login item (tests use a fake).
+    pub(crate) fn refresh_start_at_login_with(&mut self, item: &dyn crate::autolaunch::LoginItem) {
+        match item.enabled() {
+            Ok(enabled) => {
+                self.start_at_login = enabled;
+                self.start_at_login_error = None;
+            }
+            Err(why) => self.start_at_login_error = Some(why),
+        }
+    }
+
+    /// The Settings control: writes or removes the login item, then re-reads it so the toggle
+    /// shows what the registry actually holds. A failed write leaves the previous truth in place
+    /// (never a toggle that lies), records the reason for the row, and writes nothing.
+    pub(crate) fn set_start_at_login(
+        &mut self,
+        enable: bool,
+        item: &dyn crate::autolaunch::LoginItem,
+    ) {
+        if let Err(why) = item.set(enable) {
+            self.start_at_login_error = Some(why);
+            return;
+        }
+        match item.enabled() {
+            Ok(enabled) => {
+                self.start_at_login = enabled;
+                self.start_at_login_error = None;
+            }
+            Err(why) => {
+                // The write succeeded but could not be verified: show the requested state and
+                // say the registry could not be read back.
+                self.start_at_login = enable;
+                self.start_at_login_error = Some(why);
+            }
+        }
+        self.persist();
+    }
+
+    /// The Settings control's press: the real login item.
+    pub(crate) fn toggle_start_at_login(&mut self) {
+        self.set_start_at_login(!self.start_at_login, &crate::autolaunch::SystemLoginItem);
+    }
+
     /// What the content area shows.
     pub fn surface(&self) -> Surface {
         self.surface
@@ -584,6 +1191,7 @@ impl ShellState {
     /// Opens Settings in the content area; the hosted page hides while it shows.
     pub fn open_settings(&mut self) {
         self.surface = Surface::Settings;
+        self.config_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
     }
@@ -606,6 +1214,7 @@ impl ShellState {
             return false;
         }
         self.surface = Surface::Apps;
+        self.config_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
         true
@@ -619,6 +1228,88 @@ impl ShellState {
 
     pub fn notifications(&self) -> &NotificationCenter {
         &self.notifications
+    }
+
+    /// Pushes a tab directly (slice-8 tests build a page-source tab without a session).
+    #[cfg(test)]
+    pub fn tabs_mut_for_tests(&mut self) -> &mut Vec<AppTab> {
+        &mut self.tabs
+    }
+
+    /// Removes every private manifest from the service's store (the gone-manifest test: a
+    /// private manifest deleted underneath an installed session).
+    #[cfg(test)]
+    pub fn private_store_remove_all_for_tests(&mut self) {
+        let ids: Vec<u64> = self
+            .store
+            .private_store()
+            .get_private_manifests()
+            .iter()
+            .filter_map(|manifest| manifest.id.parse::<u64>().ok())
+            .collect();
+        for id in ids {
+            let _ = self.store.delete_private_manifest(id);
+        }
+    }
+
+    /// Applies one action to the center: the bridge (`super::notifications::deliver_to`), the
+    /// panel's presses and the frame's snooze expiry all write through here.
+    pub(crate) fn notifications_mut(&mut self) -> &mut NotificationCenter {
+        &mut self.notifications
+    }
+
+    /// A page's `closeNotification(id)`: the stored notification is removed, exactly the
+    /// preload's `'notification-close'` channel. The `#close` misinterpretation most apps have
+    /// (sagas.ts) does not apply: the page is closing *its own* notification.
+    pub(crate) fn close_notification(&mut self, notification_id: &str) -> bool {
+        if self.notifications.notification(notification_id).is_none() {
+            return false;
+        }
+        self.notifications
+            .apply(NotificationAction::RemoveNotification {
+                notification_id: notification_id.to_owned(),
+            });
+        true
+    }
+
+    /// A notification row pressed: the `sagaNotificationClick` order — the notification is
+    /// marked read (dropped) first, then the click is routed. Nothing to route (no tab) drops
+    /// it anyway, like the saga's early return. Returns the sender's tab, when the notification
+    /// records one, so the view action can deliver the click message to that page (the state
+    /// itself never holds the web view, D5).
+    pub(crate) fn click_notification(&mut self, notification_id: &str) -> Option<String> {
+        let Some(target) = self.notifications.click_target(notification_id) else {
+            self.notifications
+                .apply(NotificationAction::NotificationClick {
+                    notification_id: notification_id.to_owned(),
+                    interface_type: String::new(),
+                });
+            return None;
+        };
+        let source_tab = self
+            .notifications
+            .notification(notification_id)
+            .and_then(|notification| notification.tab_id.clone())
+            .filter(|tab_id| !tab_id.is_empty());
+        self.notifications
+            .apply(NotificationAction::NotificationClick {
+                notification_id: notification_id.to_owned(),
+                interface_type: String::new(),
+            });
+        match target {
+            notification_center::ClickTarget::WebContents(_) => {
+                // No web-contents registry in this shell; a page-sourced click carries a tab id.
+            }
+            notification_center::ClickTarget::Tab(tab_id) => {
+                // The panel over the page closes so the focused tab's page can show; `select`
+                // still runs when no overlay was up.
+                if self.surface != Surface::Apps {
+                    self.close_overlay();
+                }
+                self.select(&tab_id);
+            }
+        }
+        source_tab
     }
 
     /// The panel's "Mark all read": the center drops every notification.
@@ -748,11 +1439,115 @@ impl ShellState {
         SessionState {
             window: self.window.clone(),
             theme: self.theme,
+            start_at_login: self.start_at_login,
             active_application: Some(self.active.clone()),
-            rail_order: self.tabs.iter().skip(1).map(|tab| tab.id.clone()).collect(),
+            // The user's order, healed against the dock (install appends, uninstall drops): the
+            // document must name the docked set exactly for the next launch to take it.
+            rail_order: {
+                let mut order = self.rail_order.clone();
+                let docked: std::collections::HashSet<&str> =
+                    self.store.dock().iter().map(|id| id.as_str()).collect();
+                order.retain(|id| docked.contains(id.as_str()));
+                for id in self.store.dock() {
+                    if !order.contains(id) {
+                        order.push(id.clone());
+                    }
+                }
+                order
+            },
             installed,
             dock: self.store.dock().to_vec(),
             tabs: self.store.tabs().to_vec(),
+            // Only configured applications get an entry; an empty map serializes as absent.
+            app_config: self
+                .store
+                .installed_applications()
+                .values()
+                .filter(|application| {
+                    let config = &application.config_data;
+                    config.identity_id.is_some()
+                        || config.subdomain.is_some()
+                        || config.custom_url.is_some()
+                })
+                .map(|application| {
+                    (
+                        application.application_id.clone(),
+                        AppConfigEntry {
+                            identity_id: application.config_data.identity_id.clone(),
+                            subdomain: application.config_data.subdomain.clone(),
+                            custom_url: application.config_data.custom_url.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            // Accounts ride the document unchanged: this slice has no writer besides the (later)
+            // sign-in, and dropping them on any user action would lose them.
+            identities: self.identities.clone(),
         }
     }
+}
+
+/// `UPDATE_BADGE`'s normalization, taken from `tab-model` instead of copied: its private
+/// `normalize_badge` is reached through the public reducer (an empty value clears; a base-10
+/// integer prefix is a count; anything else is text), exactly the TS `normalizedBadgeValue`.
+fn normalize_page_badge(value: &str) -> Option<Badge> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut model = TabModel::new();
+    model.apply(TabAction::add("page-meta", "page-meta", ""));
+    model.apply(TabAction::UpdateBadge {
+        tab_id: "page-meta".to_owned(),
+        badge: value.to_owned(),
+    });
+    model.tab("page-meta").and_then(|tab| tab.badge.clone())
+}
+
+/// The one configuration field a manifest's presets consume, in the TS saga's order
+/// (`setIdentityIfMultiInstanceApplication`: google-account, then subdomain, then on-premise).
+/// `None` for a manifest with no presets — nothing to configure.
+fn config_field_for(manifest: &manifest_registry::BxAppManifest) -> Option<ConfigField> {
+    let presets = manifest_registry::get_presets(manifest);
+    if presets.contains(&manifest_registry::Preset::GoogleAccount) {
+        Some(ConfigField::Identity)
+    } else if presets.contains(&manifest_registry::Preset::Subdomain) {
+        Some(ConfigField::Subdomain)
+    } else if presets.contains(&manifest_registry::Preset::OnPremise) {
+        Some(ConfigField::CustomUrl)
+    } else {
+        None
+    }
+}
+
+/// The session entry as the service's `set_config_data` takes it (the same three fields).
+fn to_service_config(config: &AppConfigEntry) -> ApplicationConfigData {
+    ApplicationConfigData {
+        identity_id: config.identity_id.clone(),
+        subdomain: config.subdomain.clone(),
+        custom_url: config.custom_url.clone(),
+    }
+}
+
+/// The same conversion, for the tests that drive the service beside the state.
+#[cfg(test)]
+pub(crate) fn to_service_config_for_tests(config: &AppConfigEntry) -> ApplicationConfigData {
+    to_service_config(config)
+}
+
+/// The editor's saved draft, trimmed and bounded the way the document is (`session-store`
+/// refuses anything past the caps; the trim here is the polite path and the cap the hard one).
+fn trimmed(mut config: AppConfigEntry) -> AppConfigEntry {
+    let cut = |value: Option<String>| {
+        value.map(|value| {
+            value
+                .trim()
+                .chars()
+                .take(session_store::MAX_CONFIG_VALUE_CHARS)
+                .collect::<String>()
+        })
+    };
+    config.identity_id = cut(config.identity_id);
+    config.subdomain = cut(config.subdomain);
+    config.custom_url = cut(config.custom_url);
+    config
 }

@@ -1,0 +1,5 @@
+// One icon line: gives the exe itself an icon resource so Explorer and the taskbar
+// stop falling back to the generic exe icon. Paths are relative to the crate root (rc.exe runs
+// there); `../../assets/station.ico` is the copied build asset (origin:
+// packages/app/build/icon.ico, deleted with the TS tree).
+IDI_ICON1 ICON "../../assets/station.ico"

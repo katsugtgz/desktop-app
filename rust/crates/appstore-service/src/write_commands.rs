@@ -339,9 +339,20 @@ impl ApplicationService {
     /// Tests get an isolated temp-dir store without pulling in a tempfile
     /// dependency: a fresh folder under the system temp dir, removed when
     /// this process exits is fine for `cargo test` hygiene.
+    ///
+    /// The folder is unique per call, not just per tag: several tests reuse one tag (and two
+    /// test binaries in different processes can run the same tag at once), and this constructor
+    /// deletes the folder first, so sharing it would delete a live store underneath another
+    /// test.
     #[doc(hidden)]
     pub fn for_tests(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("station-s11b-{tag}"));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "station-s11b-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         Self::from_manifests_path(dir.join("private-manifests.json"))
@@ -468,6 +479,67 @@ impl ApplicationService {
         start_url_for_install(&manifest, manifest_url, application_id, config)
     }
 
+    /// `setConfigData` (`packages/app/src/applications/duck.ts`, via
+    /// `window.bxApi.applications.setConfigData`): sets an installed
+    /// application's multi-instance configuration.
+    ///
+    /// TS merges the given fields into the stored config data (`SET_CONFIG_DATA` sets each truthy
+    /// field it names and keeps the rest): each `Some` field here overwrites the stored one, the
+    /// others keep their value. The preset gate
+    /// (`setIdentityIfMultiInstanceApplication`'s order) still applies: only
+    /// the field the manifest's first matching preset consumes is kept, so a
+    /// `subdomain` on a google-account app is not stored. `Ok(false)` when
+    /// nothing changed (the id is unknown or no field survived the gate), so
+    /// a caller only persists when it must.
+    pub fn set_config_data(
+        &mut self,
+        application_id: &str,
+        config: &ApplicationConfigData,
+    ) -> Result<bool, ApplicationError> {
+        let Some(installed) = self.installed.get(application_id) else {
+            return Err(ApplicationError::NotInstalled(application_id.to_owned()));
+        };
+        let manifest = self.resolve_manifest(&installed.manifest_url)?;
+        // Merge first (TS `state.setIn` per truthy field), then gate.
+        let mut merged = installed.config_data.clone();
+        if config.identity_id.is_some() {
+            merged.identity_id = config.identity_id.clone();
+        }
+        if config.subdomain.is_some() {
+            merged.subdomain = config.subdomain.clone();
+        }
+        if config.custom_url.is_some() {
+            merged.custom_url = config.custom_url.clone();
+        }
+        let kept = config_data_for_presets(&manifest, &merged);
+        if kept == installed.config_data {
+            return Ok(false);
+        }
+        self.installed
+            .get_mut(application_id)
+            .expect("checked above")
+            .config_data = kept;
+        Ok(true)
+    }
+
+    /// The settings surface's "Clear": removes an installed application's
+    /// multi-instance configuration, reverting it to the manifest's own
+    /// (signed-out) start URL. False when there was nothing to clear; an
+    /// unknown id is an error, like [`ApplicationService::uninstall`].
+    pub fn clear_config_data(&mut self, application_id: &str) -> Result<bool, ApplicationError> {
+        let Some(installed) = self.installed.get(application_id) else {
+            return Err(ApplicationError::NotInstalled(application_id.to_owned()));
+        };
+        if installed.config_data == ApplicationConfigData::default() {
+            return Ok(false);
+        }
+        self.installed
+            .get_mut(application_id)
+            .expect("checked above")
+            .config_data = ApplicationConfigData::default();
+        Ok(true)
+    }
+
     /// Port of `uninstallApplication` (lifecycle.ts): close all tabs in the
     /// app, drop the application entry, remove the dock item, remove the
     /// password-manager link, delete the app's favorites.
@@ -494,6 +566,44 @@ impl ApplicationService {
         self.links.retain(|(app, _)| app != application_id);
 
         Ok(())
+    }
+
+    /// Port of `uninstallAllInstances` (`abstract-application/sagas.ts`):
+    /// uninstall every installed application of `manifest_url`, then delete
+    /// the private manifest when the URL names one above the 1000000
+    /// sentinel (the saga's `manifestId > 1000000` guard; an absent id is a
+    /// no-op in the store, like the TS `filter`).
+    ///
+    /// TS order is kept — instances first, manifest last — so a failing
+    /// private-store write is reported after the removals, the same partial
+    /// state the saga leaves behind; each per-instance uninstall itself
+    /// stays all-or-nothing. Returns the number of instances removed.
+    pub fn uninstall_all_for_manifest(
+        &mut self,
+        manifest_url: &str,
+    ) -> Result<usize, ApplicationError> {
+        let ids: Vec<String> = self
+            .installed
+            .values()
+            .filter(|a| a.manifest_url == manifest_url)
+            .map(|a| a.application_id.clone())
+            .collect();
+        for id in &ids {
+            self.uninstall(id)?;
+        }
+        // `manifestURL.match(/^station-manifest:\/\/(\d+)$/)` without a
+        // regex: digits only, and a number too large for u64 names no real
+        // manifest (TS's `Number` overflow behaves the same — the delete is
+        // a no-op).
+        if let Some(id) = manifest_url
+            .strip_prefix("station-manifest://")
+            .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .filter(|&id| id > 1_000_000)
+        {
+            self.delete_private_manifest(id)?;
+        }
+        Ok(ids.len())
     }
 
     /// Replays a persisted session into this service: the installed applications, the dock and
@@ -1258,6 +1368,63 @@ mod tests {
     }
 
     #[test]
+    fn golden_uninstall_all_for_manifest_removes_instances_keeps_others() {
+        let mut apps = ApplicationService::for_tests("uninstall-all-for-manifest");
+
+        // Two instances of one manifest, one survivor on another.
+        let a = apps.install(GMAIL, &InstallOptions::default()).unwrap();
+        let b = apps.install(GMAIL, &InstallOptions::default()).unwrap();
+        let other = apps
+            .install("station-manifest://157", &InstallOptions::default())
+            .unwrap();
+
+        let removed = apps.uninstall_all_for_manifest(GMAIL).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!apps
+            .installed_applications()
+            .contains_key(&a.application_id));
+        assert!(!apps
+            .installed_applications()
+            .contains_key(&b.application_id));
+        assert!(apps
+            .installed_applications()
+            .contains_key(&other.application_id));
+        assert!(apps
+            .tabs()
+            .iter()
+            .all(|t| t.application_id != a.application_id && t.application_id != b.application_id));
+        assert_eq!(apps.dock(), std::slice::from_ref(&other.application_id));
+
+        // A private manifest above the 1000000 sentinel goes with its last
+        // instance (the saga's `manifestId > 1000000` deleteManifest call).
+        let created = apps
+            .request_private_application(NewPrivateApplication {
+                name: "Acme Corp Intranet".into(),
+                theme_color: "#112233".into(),
+                icon_url: "https://acme.test/logo.png".into(),
+                start_url: "https://acme.test/login".into(),
+                scope: "https://acme.test".into(),
+            })
+            .unwrap();
+        apps.install(&created.bx_app_manifest_url, &InstallOptions::default())
+            .unwrap();
+        let removed = apps
+            .uninstall_all_for_manifest(&created.bx_app_manifest_url)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(apps.private_manifests().iter().all(|m| m.id != created.id));
+
+        // The survivor is still uninstallable on its own.
+        apps.uninstall(&other.application_id).unwrap();
+
+        // Zero instances (unknown URL): Ok(0), nothing else disturbed.
+        let removed = apps
+            .uninstall_all_for_manifest("station-manifest://999999")
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
     fn golden_add_application_request_guards_and_payload() {
         let mut apps = ApplicationService::for_tests("add-request");
 
@@ -1652,5 +1819,221 @@ mod tests {
             serde_json::json!("oa/1")
         );
         assert_eq!(serde_json::from_value::<InstallContext>(json).unwrap(), ctx);
+    }
+
+    // ---- set_config_data / clear_config_data (slice 10) ----------------
+
+    const GITLAB: &str = "station-manifest://123";
+
+    #[test]
+    fn set_config_data_templates_the_start_url_for_a_google_account_app() {
+        let mut apps = ApplicationService::for_tests("config-gmail");
+        let app_id = apps
+            .install(GMAIL, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        let changed = apps
+            .set_config_data(
+                &app_id,
+                &ApplicationConfigData {
+                    identity_id: Some("identity-9".into()),
+                    ..ApplicationConfigData::default()
+                },
+            )
+            .unwrap();
+        assert!(changed);
+
+        let resolved = apps
+            .resolve_start_url(
+                GMAIL,
+                &app_id,
+                &ApplicationConfigData {
+                    identity_id: Some("identity-9".into()),
+                    ..ApplicationConfigData::default()
+                },
+            )
+            .unwrap();
+        // The template's `{{userIdentity.profileData.email}}` renders the
+        // stored value's shape (the TS template's own lookup); what matters
+        // here is that *some* identity was templated in, not the default
+        // empty render.
+        assert!(
+            resolved.starts_with("https://accounts.google.com/AddSession?"),
+            "{resolved}"
+        );
+    }
+
+    #[test]
+    fn set_config_data_keeps_only_what_the_first_preset_consumes() {
+        // A google-account preset drop: the TS saga's order
+        // (`setIdentityIfMultiInstanceApplication`) keeps the identity and
+        // never a subdomain the caller also passed.
+        let mut apps = ApplicationService::for_tests("config-gate");
+        let app_id = apps
+            .install(GMAIL, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                identity_id: Some("identity-9".into()),
+                subdomain: Some("acme".into()),
+                custom_url: Some("https://corp.example.com".into()),
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.identity_id.as_deref(), Some("identity-9"));
+        assert_eq!(app.config_data.subdomain, None);
+        assert_eq!(app.config_data.custom_url, None);
+    }
+
+    #[test]
+    fn set_config_data_on_a_subdomain_app_drives_the_template() {
+        // 100 Atlassian: subdomain preset, `start_url_tpl` = https://{{subdomain}}.atlassian.net/login
+        let mut apps = ApplicationService::for_tests("config-subdomain");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.subdomain.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn set_config_data_on_an_on_premise_app_stores_the_custom_url() {
+        let mut apps = ApplicationService::for_tests("config-on-premise");
+        let app_id = apps
+            .install(GITLAB, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                custom_url: Some("https://gitlab.corp.acme.dev".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            apps.resolve_start_url(
+                GITLAB,
+                &app_id,
+                &ApplicationConfigData {
+                    custom_url: Some("https://gitlab.corp.acme.dev".into()),
+                    ..ApplicationConfigData::default()
+                }
+            )
+            .as_deref(),
+            Some("https://gitlab.corp.acme.dev")
+        );
+    }
+
+    #[test]
+    fn set_config_data_merges_over_the_stored_fields() {
+        // TS `SET_CONFIG_DATA` sets each truthy field it names and keeps the rest.
+        let mut apps = ApplicationService::for_tests("config-merge");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("other".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.subdomain.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn setting_the_same_config_again_reports_no_change() {
+        let mut apps = ApplicationService::for_tests("config-idempotent");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        let config = ApplicationConfigData {
+            subdomain: Some("acme".into()),
+            ..ApplicationConfigData::default()
+        };
+
+        assert!(apps.set_config_data(&app_id, &config).unwrap());
+        assert!(!apps.set_config_data(&app_id, &config).unwrap());
+    }
+
+    #[test]
+    fn set_config_data_on_an_unknown_app_is_an_error() {
+        let mut apps = ApplicationService::for_tests("config-unknown");
+        match apps.set_config_data("application-gone", &ApplicationConfigData::default()) {
+            Err(ApplicationError::NotInstalled(id)) => assert_eq!(id, "application-gone"),
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
+        assert!(apps.clear_config_data("application-gone").is_err());
+    }
+
+    #[test]
+    fn clear_config_data_reverts_to_the_manifest_start_url() {
+        let mut apps = ApplicationService::for_tests("config-clear");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+        assert!(apps.installed_applications()[&app_id]
+            .config_data
+            .subdomain
+            .is_some());
+
+        assert!(apps.clear_config_data(&app_id).unwrap());
+        assert!(
+            !apps.clear_config_data(&app_id).unwrap(),
+            "second clear changed nothing"
+        );
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data, ApplicationConfigData::default());
+        // Back to the bare template (empty subdomain), like the signed-out install.
+        let resolved = apps.resolve_start_url("station-manifest://100", &app_id, &app.config_data);
+        assert_eq!(
+            resolved.as_deref(),
+            Some("https://.atlassian.net/login"),
+            "clear did not revert to the plain template"
+        );
     }
 }

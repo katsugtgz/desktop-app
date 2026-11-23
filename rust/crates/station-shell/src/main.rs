@@ -7,20 +7,78 @@
 //! `AppSpec` renders.
 
 mod appstore;
+mod autolaunch;
+mod deep_link;
+mod downloads;
+mod ico;
+mod icons;
+mod instance;
 mod notifications;
 mod placeholder;
+#[cfg(target_os = "windows")]
+mod platform_icon;
 mod rail;
 mod routing;
 mod session;
 mod settings;
 mod shell;
 mod state;
+#[cfg(test)]
+mod test_support;
+mod tray;
 mod webview;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tests_pages;
+
+#[cfg(test)]
+mod tests_icons;
+
+#[cfg(test)]
+mod tests_config;
+
+#[cfg(test)]
+mod tests_rail_order;
+
+#[cfg(test)]
+mod tests_deep_link;
+
+#[cfg(test)]
+mod tests_dpi;
+
+#[cfg(test)]
+mod tests_instance;
+
+#[cfg(test)]
+mod tests_notify_click;
+
+#[cfg(test)]
+mod tests_notify_icons;
+
+#[cfg(test)]
+mod tests_tray;
+
+#[cfg(test)]
+mod tests_page_env;
+
+#[cfg(test)]
+mod tests_accounts;
+
+#[cfg(test)]
+mod tests_page_meta;
+
+#[cfg(test)]
+mod tests_downloads;
+
 fn main() {
+    // One shell per session: a second launch forwards its `station://` argument to the running
+    // shell and exits before any window is asked for. Must precede Rune: a secondary never
+    // opens the web view stack at all.
+    instance::handoff_if_secondary();
+
     // The window opens where the session left it: the size is the spec's, the position is
     // applied once the native window exists, and maximized is the app's own launch flag.
     let path = session::path();
@@ -29,12 +87,21 @@ fn main() {
     // real display scale re-checks the device-pixel ceiling in `on_window`.
     let (width, height) = session::safe_window_size(window.width, window.height, 1.0);
 
-    rune::App::new(rune::AppSpec {
+    let app = rune::App::new(rune::AppSpec {
         // Escape leaves Settings and the notification panel; Rune hands over keys no control took.
         on_key: Some(shell::on_key),
         // A page's new-window request is queued from the web view's thread; the wake makes the
-        // next frame poll for it, and poll routes it (select/load, or the OS browser).
-        setup: Some(webview::setup),
+        // next frame poll for it, and poll routes it (select/load, or the OS browser). The same
+        // waker starts the icons worker, so a fetched icon wakes the next frame itself.
+        // Setup is also the one deep-link read: the `station://` URL this process was launched
+        // with is honoured once, here (`deep_link::open`), never again while running. The
+        // single-instance listener starts here too: the waker it keeps makes the next frame
+        // drain a link a second launch hands over.
+        setup: Some(|state, waker| {
+            webview::setup(state, waker.clone());
+            instance::start_primary(waker);
+            deep_link::open(state, &std::env::args_os().collect::<Vec<_>>());
+        }),
         poll: Some(webview::poll),
         // Named states for snapshots: the two surfaces the rail opens.
         scenes: &[
@@ -58,10 +125,17 @@ fn main() {
     .on_close(|state, _| {
         state.save();
         webview::close_all();
+        instance::shutdown();
     })
     .on_quit(|state, _| {
         state.save();
         webview::close_all();
-    })
-    .run();
+        instance::shutdown();
+    });
+
+    // The notification-area icon runs on Rune's own tray thread; keep the Tray alive for the
+    // app's whole life (dropping it removes the icon). Windows only, like the icon asset.
+    #[cfg(target_os = "windows")]
+    let _tray = tray::start(app.handle());
+    app.run();
 }

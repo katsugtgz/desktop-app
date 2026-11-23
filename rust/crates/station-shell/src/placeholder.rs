@@ -26,7 +26,7 @@ pub fn top_bar(state: &ShellState, p: Paint) -> El {
         .fill(p.t.bg)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.t.separator)
         .child(
-            text(tab.label.clone())
+            text(tab.display_label().to_owned())
                 .key("topbar-title")
                 .font(type_::TITLE)
                 .color(p.t.text),
