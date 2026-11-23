@@ -318,6 +318,8 @@ pub struct ShellState {
     zoom: BTreeMap<String, f64>,
     /// Tab id whose Rune tab-actions strip is open (right-click on rail or top-bar `•••`).
     tab_menu: Option<String>,
+    /// In-tab search bar state (`Ctrl+F` / `Cmd+F`; transient, never persisted).
+    find: crate::find::FindState,
 }
 
 /// The settings editor's draft for one installed application.
@@ -407,6 +409,7 @@ impl ShellState {
             oauth_status: None,
             zoom: BTreeMap::new(),
             tab_menu: None,
+            find: crate::find::FindState::default(),
         };
         state.rebuild_tabs();
         state
@@ -644,9 +647,74 @@ impl ShellState {
         }
         self.tab_menu = None;
         if self.active != previous {
+            if self.find.open {
+                self.find.open = false;
+                self.find.reset_matches();
+                crate::webview::eval_in_tab(&previous, crate::find::CLEAR_SCRIPT);
+            }
             self.persist();
         }
         true
+    }
+
+    /// Current in-tab find bar state (`Ctrl+F` / `Cmd+F`).
+    pub fn find(&self) -> &crate::find::FindState {
+        &self.find
+    }
+
+    /// Mutable reference to the find bar's `TextEdit`.
+    pub fn find_edit_mut(&mut self) -> &mut TextEdit {
+        &mut self.find.edit
+    }
+
+    /// Opens the in-tab find bar when a web page is visible; re-runs any non-empty query.
+    pub fn open_find(&mut self) -> bool {
+        if !self.shows_page() {
+            return false;
+        }
+        self.find.open = true;
+        if !self.find.query().is_empty() {
+            self.dispatch_find(true);
+        }
+        true
+    }
+
+    /// Closes the in-tab find bar and clears highlights in the active web page.
+    pub fn close_find(&mut self) -> bool {
+        if !self.find.open {
+            return false;
+        }
+        self.find.open = false;
+        self.find.reset_matches();
+        if !self.active().renders_in_rune() {
+            let tab_id = self.active.clone();
+            crate::webview::eval_in_tab(&tab_id, crate::find::CLEAR_SCRIPT);
+        }
+        true
+    }
+
+    /// Dispatches the current find query (`forward` = next/prev) to the active web tab.
+    pub fn dispatch_find(&mut self, forward: bool) {
+        if !self.shows_page() {
+            return;
+        }
+        let tab_id = self.active.clone();
+        if self.find.query().is_empty() {
+            self.find.reset_matches();
+            crate::webview::eval_in_tab(&tab_id, crate::find::CLEAR_SCRIPT);
+            return;
+        }
+        if let Some(script) = crate::find::find_script(self.find.query(), forward) {
+            crate::webview::eval_in_tab(&tab_id, &script);
+        }
+    }
+
+    /// Applies match counts reported by the page over IPC (`kind: "find"`).
+    pub fn set_find_matches(&mut self, tab_id: &str, current: u32, total: u32) -> bool {
+        if !self.find.open || self.active != tab_id {
+            return false;
+        }
+        self.find.set_matches(current, total)
     }
 
     /// Selects a tab by 1-based rail index (`Cmd/Ctrl+1..9`), closing any open overlay.

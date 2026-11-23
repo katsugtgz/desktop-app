@@ -42,6 +42,9 @@ pub fn top_bar(state: &ShellState, p: Paint) -> El {
             .child(bar_btn("topbar-reload", "Reload", "Reload", p, move |_| {
                 crate::webview::reload(&reload_id);
             }))
+            .child(bar_btn("topbar-find", "Find in page", "Find", p, |state| {
+                state.open_find();
+            }))
             .child(bar_btn(
                 "topbar-open-browser",
                 "Open in browser",

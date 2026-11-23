@@ -16,6 +16,7 @@ mod autolaunch;
 mod deep_link;
 mod dialogs;
 mod downloads;
+mod find;
 mod ico;
 mod icons;
 mod instance;
@@ -86,6 +87,9 @@ mod tests_site_scripts;
 
 #[cfg(test)]
 mod tests_shortcuts;
+
+#[cfg(test)]
+mod tests_find;
 
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running

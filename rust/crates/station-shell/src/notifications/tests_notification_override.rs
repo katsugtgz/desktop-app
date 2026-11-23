@@ -78,6 +78,8 @@ fn the_override_is_installed_after_the_api_and_defines_no_other_global() {
         defined_globals(INIT_SCRIPT),
         [
             "Notification",
+            "__stationFind",
+            "__stationFindClear",
             "__stationNotificationClick",
             "__stationSnoozeUpdate",
             "bxApi",

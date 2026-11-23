@@ -30,11 +30,11 @@ impl Paint {
     }
 }
 
-/// Keys no control took: global shortcuts matching Station's keymap (`Escape`, reload, back,
-/// forward, zoom, Settings, tab jump 1..9).
+/// Keys no control took: global shortcuts matching Station's keymap (`Escape`, find, reload,
+/// back, forward, zoom, Settings, tab jump 1..9).
 pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
     if event.key == rune::Key::Escape {
-        return state.close_tab_menu() || state.close_overlay();
+        return state.close_find() || state.close_tab_menu() || state.close_overlay();
     }
     if event.is_command(',') {
         state.open_settings();
@@ -46,6 +46,9 @@ pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) 
     }
     let active_web = state.shows_page().then(|| state.active().id.clone());
     if let Some(tab_id) = active_web {
+        if event.is_command('f') {
+            return state.open_find();
+        }
         if event.is_command('r') || event.key == rune::Key::Function(5) {
             crate::webview::reload(&tab_id);
             return true;
@@ -124,6 +127,9 @@ pub fn view_themed(state: &ShellState, dark: bool) -> El {
         .child(placeholder::top_bar(state, p));
     if let Some(actions) = placeholder::tab_actions_bar(state, p) {
         pane = pane.child(actions);
+    }
+    if state.find().open && state.shows_page() {
+        pane = pane.child(crate::find::bar(state, p));
     }
     pane = pane.child(body);
     col().key("shell").w_full().h_full().fill(p.t.bg).child(

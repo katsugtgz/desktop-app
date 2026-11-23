@@ -276,6 +276,117 @@ pub const INIT_SCRIPT: &str = r#"(() => {
   } else {
     observePageMeta();
   }
+
+  // In-tab literal search (Slice 27): wraps text matches in <mark data-station-find="1">
+  // without ever passing user text to RegExp, and reports `{ current, total }` over IPC.
+  const FIND_SKIP_TAGS = {
+    SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1,
+  };
+  const MAX_FIND_MARKS = 1000;
+  let findQuery = '';
+  let findMarks = [];
+  let findIndex = -1;
+  const paintFindMarks = () => {
+    for (let i = 0; i < findMarks.length; i++) {
+      const m = findMarks[i];
+      if (!m || !m.style) continue;
+      if (i === findIndex) {
+        m.style.backgroundColor = '#f97316';
+        m.style.color = '#ffffff';
+      } else {
+        m.style.backgroundColor = '#fde047';
+        m.style.color = '#111827';
+      }
+    }
+    if (findIndex >= 0 && findIndex < findMarks.length) {
+      try { findMarks[findIndex].scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) {}
+    }
+  };
+  const clearFind = () => {
+    const marks = document.querySelectorAll('mark[data-station-find]');
+    for (const mark of marks) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
+      parent.normalize();
+    }
+    findQuery = '';
+    findMarks = [];
+    findIndex = -1;
+    postPageMeta({ kind: 'find', current: 0, total: 0 });
+    return { current: 0, total: 0 };
+  };
+  const runFind = (query, forward) => {
+    const q = typeof query === 'string' ? query : '';
+    const goForward = forward !== false;
+    if (!q) return clearFind();
+    if (q === findQuery && findMarks.length > 0) {
+      findIndex = goForward
+        ? (findIndex + 1) % findMarks.length
+        : (findIndex - 1 + findMarks.length) % findMarks.length;
+      paintFindMarks();
+      const res = { current: findIndex + 1, total: findMarks.length };
+      postPageMeta({ kind: 'find', current: res.current, total: res.total });
+      return res;
+    }
+    clearFind();
+    findQuery = q;
+    if (!document.body) {
+      postPageMeta({ kind: 'find', current: 0, total: 0 });
+      return { current: 0, total: 0 };
+    }
+    const needle = q.toLowerCase();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let currentNode;
+    while ((currentNode = walker.nextNode())) {
+      const parent = currentNode.parentElement;
+      if (!parent || FIND_SKIP_TAGS[parent.tagName] || parent.hasAttribute('data-station-find') || parent.isContentEditable) {
+        continue;
+      }
+      if (currentNode.nodeValue && currentNode.nodeValue.toLowerCase().indexOf(needle) !== -1) {
+        nodes.push(currentNode);
+      }
+    }
+    for (const textNode of nodes) {
+      if (findMarks.length >= MAX_FIND_MARKS) break;
+      const text = textNode.nodeValue || '';
+      const lower = text.toLowerCase();
+      let pos = 0;
+      let hit = lower.indexOf(needle, pos);
+      if (hit === -1) continue;
+      const frag = document.createDocumentFragment();
+      while (hit !== -1 && findMarks.length < MAX_FIND_MARKS) {
+        if (hit > pos) frag.appendChild(document.createTextNode(text.slice(pos, hit)));
+        const mark = document.createElement('mark');
+        mark.setAttribute('data-station-find', '1');
+        mark.style.borderRadius = '2px';
+        mark.style.padding = '0';
+        mark.textContent = text.slice(hit, hit + q.length);
+        frag.appendChild(mark);
+        findMarks.push(mark);
+        pos = hit + q.length;
+        hit = lower.indexOf(needle, pos);
+      }
+      if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+      if (textNode.parentNode) textNode.parentNode.replaceChild(frag, textNode);
+    }
+    if (findMarks.length > 0) {
+      findIndex = goForward ? 0 : findMarks.length - 1;
+      paintFindMarks();
+      const res = { current: findIndex + 1, total: findMarks.length };
+      postPageMeta({ kind: 'find', current: res.current, total: res.total });
+      return res;
+    }
+    postPageMeta({ kind: 'find', current: 0, total: 0 });
+    return { current: 0, total: 0 };
+  };
+  Object.defineProperty(window, '__stationFind', {
+    value: runFind, writable: false, configurable: false, enumerable: false,
+  });
+  Object.defineProperty(window, '__stationFindClear', {
+    value: clearFind, writable: false, configurable: false, enumerable: false,
+  });
 })();"#;
 
 /// The click callbacks one page may register (`addNotificationClickListener`); a ninth is
@@ -361,17 +472,23 @@ pub enum PageMessage {
         tab_id: String,
         badge: Option<String>,
     },
+    /// In-tab search result (`window.__stationFind`): 1-based `current` match and `total` count.
+    Find {
+        tab_id: String,
+        current: u32,
+        total: u32,
+    },
 }
 
 /// The wire format: the Electron preload's `ipcRenderer.send` payloads plus the `kind` tag that
 /// picks the channel (`'new-notification'` / `'notification-close'`), and (slice 20) the page's
 /// own presentation: `title` (`document.title`, Electron's `page-title-updated` event) and
-/// `meta` (`browserx-*` metas, TS `page-bxmetas-updated`).
+/// `meta` (`browserx-*` metas, TS `page-bxmetas-updated`), plus (slice 27) `find` match counts.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireMessage {
     kind: String,
-    /// Notification id; absent for `title`/`meta` (a send/close without it is malformed).
+    /// Notification id; absent for `title`/`meta`/`find` (a send/close without it is malformed).
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -382,6 +499,12 @@ struct WireMessage {
     /// `kind: "meta"`: every `browserx-*` meta value, keyed by the name without the prefix.
     #[serde(default)]
     metas: Option<HashMap<String, String>>,
+    /// `kind: "find"`: 1-based index of active match (0 when none).
+    #[serde(default)]
+    current: Option<u32>,
+    /// `kind: "find"`: total matches found in page.
+    #[serde(default)]
+    total: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -519,6 +642,18 @@ pub fn parse(sender: Sender, message: &str) -> Result<PageMessage, Refusal> {
                 .filter(|badge| !badge.is_empty());
             Ok(PageMessage::Meta { tab_id, badge })
         }
+        "find" => {
+            let current = wire.current.unwrap_or(0);
+            let total = wire.total.unwrap_or(0);
+            if total > 100_000 || current > total {
+                return Err(Refusal::TooLarge);
+            }
+            Ok(PageMessage::Find {
+                tab_id,
+                current,
+                total,
+            })
+        }
         _ => Err(Refusal::Malformed),
     }
 }
@@ -591,7 +726,8 @@ fn same_slot(queued: &PageMessage, next: &PageMessage) -> bool {
             },
         ) => tab_id == other_tab && notification_id == other_id,
         (PageMessage::Title { tab_id, .. }, PageMessage::Title { tab_id: other, .. })
-        | (PageMessage::Meta { tab_id, .. }, PageMessage::Meta { tab_id: other, .. }) => {
+        | (PageMessage::Meta { tab_id, .. }, PageMessage::Meta { tab_id: other, .. })
+        | (PageMessage::Find { tab_id, .. }, PageMessage::Find { tab_id: other, .. }) => {
             tab_id == other
         }
         _ => false,
@@ -673,6 +809,13 @@ pub fn deliver_to(state: &mut ShellState) -> bool {
             }
             PageMessage::Meta { tab_id, badge } => {
                 changed |= state.set_page_badge(&tab_id, badge.as_deref());
+            }
+            PageMessage::Find {
+                tab_id,
+                current,
+                total,
+            } => {
+                changed |= state.set_find_matches(&tab_id, current, total);
             }
         }
     }
