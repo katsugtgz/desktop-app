@@ -177,6 +177,7 @@ fn short_hash(id: &str) -> String {
 pub struct PageEnvironment {
     pub user_agent: String,
     pub profile: PageProfile,
+    pub legacy_service_id: Option<String>,
 }
 
 impl PageEnvironment {
@@ -198,6 +199,7 @@ impl PageEnvironment {
         Self {
             user_agent,
             profile,
+            legacy_service_id: tab.legacy_service_id.clone(),
         }
     }
 }
@@ -294,6 +296,9 @@ pub trait WebviewHost {
     /// Deliver one notification click to the page behind `tab_id`: evaluate the script that
     /// invokes the page's registered click listeners with `notification_id`.
     fn click(&mut self, tab_id: &str, notification_id: &str) -> Result<(), WebviewError>;
+    /// Evaluate an arbitrary shell-generated script inside an attached page (snooze fan-out,
+    /// history navigation, in-tab search).
+    fn eval_script(&mut self, tab_id: &str, script: &str) -> Result<(), WebviewError>;
     /// The window's scale changed: later bounds are converted with it.
     fn set_scale(&mut self, scale: f32);
     /// Show or hide an attached page without destroying it.
@@ -364,6 +369,8 @@ struct Engine {
     closed: bool,
     /// The last log line and when it was printed, so a failure every frame logs once in a while.
     last_log: Option<(String, f64)>,
+    /// The last snooze duration broadcast to attached pages (`__stationSnoozeUpdate`).
+    last_snooze: Option<u64>,
 }
 
 thread_local! {
@@ -388,6 +395,7 @@ pub fn install(host: Box<dyn WebviewHost>) {
             scale: 0.0,
             closed: false,
             last_log: None,
+            last_snooze: None,
         });
     });
 }
@@ -462,6 +470,7 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     // freshly fetched icon are frame work: their threads only queue, the poll owns the state.
     changed |= crate::notifications::deliver_to(state);
     changed |= crate::notifications::expire_snooze(state, clock);
+    sync_snooze(state.effective_snooze_duration_ms());
     state.prefetch_icons();
     changed |= state.drain_icons();
     changed
@@ -682,6 +691,34 @@ pub(crate) fn click_script(notification_id: &str) -> Option<String> {
     Some(format!("window.__stationNotificationClick({encoded});"))
 }
 
+/// The script that pushes a snooze duration change to a page's registered snooze listeners.
+pub(crate) fn snooze_script(duration_ms: Option<u64>) -> String {
+    match duration_ms {
+        Some(ms) => format!("window.__stationSnoozeUpdate({ms});"),
+        None => "window.__stationSnoozeUpdate(null);".to_owned(),
+    }
+}
+
+/// Broadcasts `duration_ms` to every attached page whenever the effective snooze state changes.
+pub fn sync_snooze(duration_ms: Option<u64>) {
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let Some(engine) = engine.as_mut() else {
+            return;
+        };
+        if engine.closed || engine.last_snooze == duration_ms {
+            return;
+        }
+        engine.last_snooze = duration_ms;
+        let script = snooze_script(duration_ms);
+        let mut tabs: Vec<String> = engine.session.bounds.keys().cloned().collect();
+        tabs.sort();
+        for tab in tabs {
+            let _ = engine.host.eval_script(&tab, &script);
+        }
+    });
+}
+
 /// Delivers one notification click to the page behind `tab_id` — `sagaNotificationClick`'s
 /// `triggerClick`, asked by the view action after `ShellState` marked the notification read and
 /// routed the tab (D5: state never holds the host). An unattached page, a missing host and a
@@ -791,6 +828,10 @@ pub fn sync(state: &ShellState, rect: Option<PaneRect>, scale: f32) {
                 engine.session.bounds.insert(active.id.clone(), rect);
                 engine.session.failures.remove(&active.id);
                 engine.last_log = None;
+                if engine.last_snooze.is_some() {
+                    let script = snooze_script(engine.last_snooze);
+                    let _ = engine.host.eval_script(&active.id, &script);
+                }
                 show(engine, &active.id);
             }
             Err(why) => {
@@ -1087,10 +1128,12 @@ mod platform {
                 // this web view; nothing a page sends can change it.
                 .with_user_agent(environment.user_agent.clone())
                 .with_url(url)
-                // The page's only bridge: `window.bxApi.notificationCenter` with the Electron
-                // preload's two functions (`notifications::bridge::INIT_SCRIPT`). Messages come
-                // back through wry's ipc (`window.ipc.postMessage`) with the tab as origin.
-                .with_initialization_script(crate::notifications::INIT_SCRIPT)
+                // The page's core bridge plus optional per-site script selected by the manifest's
+                // `bx_legacy_service_id` (`site_scripts::combined_init_script`). Messages come back
+                // through wry's ipc (`window.ipc.postMessage`) with the tab as origin.
+                .with_initialization_script(crate::site_scripts::combined_init_script(
+                    environment.legacy_service_id.as_deref(),
+                ))
                 .with_ipc_handler(move |request| {
                     // `request.body()` is the page's string. The bridge owns every limit, drops
                     // what a source at its cap sends, and never panics on page input.
@@ -1166,6 +1209,14 @@ mod platform {
             view.evaluate_script(&script).map_err(|why| {
                 WebviewError::Failed(format!("click {notification_id:?} in {tab_id}: {why}"))
             })
+        }
+
+        fn eval_script(&mut self, tab_id: &str, script: &str) -> Result<(), WebviewError> {
+            self.views
+                .get(tab_id)
+                .ok_or_else(|| WebviewError::Failed(format!("no web view for {tab_id}")))?
+                .evaluate_script(script)
+                .map_err(|why| WebviewError::Failed(format!("eval in {tab_id}: {why}")))
         }
 
         fn set_visible(&mut self, tab_id: &str, visible: bool) {
@@ -1249,6 +1300,12 @@ mod platform {
             ))
         }
 
+        fn eval_script(&mut self, _: &str, _: &str) -> Result<(), WebviewError> {
+            Err(WebviewError::Unsupported(
+                "a native child web view is implemented on Windows (WebView2) only",
+            ))
+        }
+
         fn set_scale(&mut self, _: f32) {}
 
         fn set_visible(&mut self, _: &str, _: bool) {}
@@ -1300,6 +1357,11 @@ pub mod fake {
             tab: String,
             script: String,
         },
+        /// Any other shell-generated script evaluated in a page (snooze, history, find).
+        Eval {
+            tab: String,
+            script: String,
+        },
         Scale {
             scale: f32,
         },
@@ -1316,13 +1378,14 @@ pub mod fake {
         },
     }
 
-    /// The UA and profile an attach was asked for (fixed at build; recorded beside the events so
-    /// the event stream existing tests assert stays unchanged).
+    /// The UA, profile, and legacy service id an attach was asked for (fixed at build; recorded
+    /// beside the events so the event stream existing tests assert stays unchanged).
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct AttachEnvironment {
         pub tab: String,
         pub user_agent: String,
         pub profile: PageProfile,
+        pub legacy_service_id: Option<String>,
     }
 
     /// What a [`FakeWebview`] was asked, shared with the test that installed it.
@@ -1436,6 +1499,7 @@ pub mod fake {
                 tab: tab_id.to_owned(),
                 user_agent: environment.user_agent.clone(),
                 profile: environment.profile.clone(),
+                legacy_service_id: environment.legacy_service_id.clone(),
             });
             self.log.events.borrow_mut().push(Event::Attach {
                 tab: tab_id.to_owned(),
@@ -1489,6 +1553,17 @@ pub mod fake {
             self.log.events.borrow_mut().push(Event::Click {
                 tab: tab_id.to_owned(),
                 script,
+            });
+            Ok(())
+        }
+
+        fn eval_script(&mut self, tab_id: &str, script: &str) -> Result<(), WebviewError> {
+            if !self.attached.contains(tab_id) {
+                return Err(WebviewError::Failed(format!("no web view for {tab_id}")));
+            }
+            self.log.events.borrow_mut().push(Event::Eval {
+                tab: tab_id.to_owned(),
+                script: script.to_owned(),
             });
             Ok(())
         }

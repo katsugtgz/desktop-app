@@ -76,15 +76,22 @@ fn the_override_is_installed_after_the_api_and_defines_no_other_global() {
     );
     assert_eq!(
         defined_globals(INIT_SCRIPT),
-        ["Notification", "__stationNotificationClick", "bxApi"],
-        "the override added a global beyond the bridge, its hook and the Notification API"
+        [
+            "Notification",
+            "__stationNotificationClick",
+            "__stationSnoozeUpdate",
+            "bxApi",
+        ],
+        "the override added a global beyond the bridge, its hooks and the Notification API"
     );
-    // The four members the preload declared are still the page API; nothing else of bxApi exists.
+    // The six members the preload declared are still the page API; nothing else of bxApi exists.
     for member in [
         "sendNotification",
         "closeNotification",
         "addNotificationClickListener",
         "removeNotificationClickListener",
+        "addSnoozeDurationInMsChangeListener",
+        "removeSnoozeDurationInMsChangeListener",
     ] {
         assert!(INIT_SCRIPT.contains(member), "{member} is missing");
     }

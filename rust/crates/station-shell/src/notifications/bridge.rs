@@ -52,14 +52,26 @@ use crate::state::ShellState;
 /// (Telegram-only) and the recursive same-origin iframe override.
 pub const INIT_SCRIPT: &str = r#"(() => {
   const MAX_CLICK_LISTENERS = 8;
+  const MAX_SNOOZE_LISTENERS = 8;
   const clickListeners = [];
+  const snoozeListeners = [];
+  let currentSnoozeDuration = null;
   const click = (id) => {
     for (const listener of clickListeners.slice()) {
       try { listener(id); } catch (e) {}
     }
   };
+  const snoozeUpdate = (duration) => {
+    currentSnoozeDuration = duration == null ? null : duration;
+    for (const listener of snoozeListeners.slice()) {
+      try { listener(null, currentSnoozeDuration); } catch (e) {}
+    }
+  };
   Object.defineProperty(window, '__stationNotificationClick', {
     value: click, writable: false, configurable: false, enumerable: false,
+  });
+  Object.defineProperty(window, '__stationSnoozeUpdate', {
+    value: snoozeUpdate, writable: false, configurable: false, enumerable: false,
   });
   const api = {
     sendNotification: (id, notification) => {
@@ -81,6 +93,17 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     removeNotificationClickListener: (listener) => {
       const index = clickListeners.indexOf(listener);
       if (index !== -1) clickListeners.splice(index, 1);
+    },
+    addSnoozeDurationInMsChangeListener: (listener) => {
+      if (typeof listener !== 'function' || snoozeListeners.length >= MAX_SNOOZE_LISTENERS) return;
+      snoozeListeners.push(listener);
+      if (currentSnoozeDuration !== null) {
+        try { listener(null, currentSnoozeDuration); } catch (e) {}
+      }
+    },
+    removeSnoozeDurationInMsChangeListener: (listener) => {
+      const index = snoozeListeners.indexOf(listener);
+      if (index !== -1) snoozeListeners.splice(index, 1);
     },
   };
   Object.defineProperty(window, 'bxApi', { value: Object.freeze({ notificationCenter: Object.freeze(api) }) });

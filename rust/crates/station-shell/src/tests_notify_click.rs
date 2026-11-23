@@ -103,21 +103,23 @@ fn clicks(events: &[Event]) -> Vec<(String, String)> {
 // ---- The injected page side ----------------------------------------------------------------
 
 #[test]
-fn the_init_script_exposes_exactly_the_four_notification_members() {
-    // bxapi.d.ts: sendNotification, closeNotification, addNotificationClickListener,
-    // removeNotificationClickListener — and nothing else of bxApi.
+fn the_init_script_exposes_exactly_the_six_notification_members() {
+    // bxapi.d.ts: sendNotification, closeNotification, click-listener pair, and snooze-listener
+    // pair — and nothing else of bxApi.
     let api = between(INIT_SCRIPT, "const api = {", "\n  };");
     for member in [
         "sendNotification",
         "closeNotification",
         "addNotificationClickListener",
         "removeNotificationClickListener",
+        "addSnoozeDurationInMsChangeListener",
+        "removeSnoozeDurationInMsChangeListener",
     ] {
         assert!(api.contains(&format!("{member}: (")), "missing {member}");
     }
     assert_eq!(
         api.matches(": (").count(),
-        4,
+        6,
         "an extra bxApi member was invented: {api}"
     );
     assert!(INIT_SCRIPT.contains("Object.freeze"));

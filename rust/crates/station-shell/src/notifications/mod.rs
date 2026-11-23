@@ -10,9 +10,9 @@ use notification_center::NotificationAction;
 
 #[cfg(test)]
 pub use bridge::clear;
-pub use bridge::deliver_to;
 #[cfg(any(target_os = "windows", test))]
-pub use bridge::{receive, INIT_SCRIPT};
+pub use bridge::receive;
+pub use bridge::{deliver_to, INIT_SCRIPT};
 #[cfg(test)]
 pub use panel::MAX_NOTIFICATION_ICON_URLS;
 pub use panel::{icon_urls, panel};

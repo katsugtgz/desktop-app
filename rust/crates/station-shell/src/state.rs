@@ -107,6 +107,9 @@ pub struct AppTab {
     /// The manifest's `bx_use_default_session`: Electron gave the app no partition (the default
     /// session) instead of `persist:<applicationId>`.
     pub use_default_session: bool,
+    /// The manifest's `bx_legacy_service_id`: selects the static per-site injected script
+    /// (`site_scripts::for_service`) when the web view is built.
+    pub legacy_service_id: Option<String>,
 }
 
 impl AppTab {
@@ -123,6 +126,7 @@ impl AppTab {
             badge: None,
             user_agent: None,
             use_default_session: false,
+            legacy_service_id: None,
         }
     }
 
@@ -139,6 +143,7 @@ impl AppTab {
             badge: None,
             user_agent: None,
             use_default_session: false,
+            legacy_service_id: None,
         }
     }
 
@@ -513,9 +518,13 @@ impl ShellState {
                 .as_ref()
                 .and_then(|manifest| manifest.inner.bx_use_default_session)
                 .unwrap_or(false);
+            let legacy_service_id = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.inner.bx_legacy_service_id.clone());
             let mut tab = AppTab {
                 user_agent,
                 use_default_session,
+                legacy_service_id,
                 ..AppTab::web_full(
                     application.application_id.clone(),
                     self.label_for(&application.manifest_url, &id),
@@ -1336,6 +1345,19 @@ impl ShellState {
                         at_ms: now_ms,
                     });
             }
+        }
+    }
+
+    /// The current snooze state as the millisecond duration sent to hosted pages
+    /// (`__stationSnoozeUpdate`): `None` when not snoozed, the finite duration in ms for a timed
+    /// snooze, or a positive sentinel (`u32::MAX as u64`, exact in IEEE 754 JS numbers) for
+    /// infinite / active OS-synced snooze.
+    pub fn effective_snooze_duration_ms(&self) -> Option<u64> {
+        match self.notifications.snooze() {
+            None | Some(notification_center::Snooze::Unknown(_)) => None,
+            Some(notification_center::Snooze::Finite(ms)) => Some(ms),
+            Some(notification_center::Snooze::Infinite)
+            | Some(notification_center::Snooze::SyncWithOs) => Some(u64::from(u32::MAX)),
         }
     }
 
