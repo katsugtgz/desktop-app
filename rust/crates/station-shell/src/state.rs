@@ -39,6 +39,8 @@ pub enum Surface {
     Settings,
     /// The notification panel beside the content area.
     Notifications,
+    /// The About Station screen, filling the content area.
+    About,
 }
 
 /// The user's private-manifest store, or an in-memory one when the config dir cannot be opened:
@@ -306,6 +308,8 @@ pub struct ShellState {
     /// The configuration editor's draft, while Settings shows an app's editor (`None` otherwise;
     /// leaving Settings drops it). `TextEdit` is the field widget; its text is the value.
     config_draft: Option<ConfigDraft>,
+    /// Metadata and update-check state for the About Station surface (`about-window` crate).
+    about_state: about_window::AboutWindowState,
 }
 
 /// The settings editor's draft for one installed application.
@@ -391,6 +395,7 @@ impl ShellState {
             rail_order: Vec::new(),
             icons: crate::icons::IconStore::new(),
             config_draft: None,
+            about_state: about_window::AboutWindowState::default(),
         };
         state.rebuild_tabs();
         state
@@ -1203,6 +1208,27 @@ impl ShellState {
         self.config_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
+    }
+
+    /// Opens About Station in the content area; the hosted page hides while it shows.
+    pub fn open_about(&mut self) {
+        self.surface = Surface::About;
+        self.config_draft = None;
+        self.notifications
+            .apply(NotificationAction::SetVisibility { visible: false });
+    }
+
+    /// Current About Station metadata/update state.
+    pub fn about_state(&self) -> &about_window::AboutWindowState {
+        &self.about_state
+    }
+
+    /// V1 update check: records the check in `AboutWindowState` and opens GitHub Releases in the
+    /// OS browser (no-op browser spawn under unit tests).
+    pub fn check_for_updates(&mut self) {
+        self.about_state.set_checking_for_update(true);
+        #[cfg(not(test))]
+        crate::routing::open_external(crate::about::RELEASES_URL);
     }
 
     /// The rail's moon button: the notification panel opens over the content area, and closes

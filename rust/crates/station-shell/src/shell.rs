@@ -52,6 +52,7 @@ pub fn view_themed(state: &ShellState, dark: bool) -> El {
     let p = Paint::of(dark);
     let body = match state.surface() {
         Surface::Settings => settings::view(state, p),
+        Surface::About => crate::about::view(state, p),
         Surface::Apps | Surface::Notifications => {
             let app = if state.active().renders_in_rune() {
                 appstore::view(state, p)

@@ -10,9 +10,11 @@
 // and methods exercised only by Windows or unit tests. Keep full dead-code checking on Windows.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
+mod about;
 mod appstore;
 mod autolaunch;
 mod deep_link;
+mod dialogs;
 mod downloads;
 mod ico;
 mod icons;
@@ -111,10 +113,11 @@ fn main() {
             deep_link::open(state, &std::env::args_os().collect::<Vec<_>>());
         }),
         poll: Some(webview::poll),
-        // Named states for snapshots: the two surfaces the rail opens.
+        // Named states for snapshots: the surfaces the shell opens.
         scenes: &[
             ("settings", |state| state.open_settings()),
             ("notifications", |state| state.toggle_notifications()),
+            ("about", |state| state.open_about()),
         ],
         ..rune::AppSpec::new(
             "Station",
@@ -145,5 +148,26 @@ fn main() {
     // app's whole life (dropping it removes the icon). Windows only, like the icon asset.
     #[cfg(target_os = "windows")]
     let _tray = tray::start(app.handle());
-    app.run();
+
+    let headless_cli = std::env::args()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "--snap" | "--tree" | "--help" | "-h"));
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run())) {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unexpected fatal error".to_owned()
+        };
+        if !headless_cli {
+            dialogs::show_fatal_error(
+                "Station stopped unexpectedly",
+                &format!("Station encountered an unrecoverable error and must close.\n\n{msg}"),
+            );
+        } else {
+            eprintln!("station-shell fatal: {msg}");
+        }
+        std::process::exit(101);
+    }
 }

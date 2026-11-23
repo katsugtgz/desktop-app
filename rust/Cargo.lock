@@ -4275,6 +4275,7 @@ dependencies = [
 name = "station-shell"
 version = "0.1.0"
 dependencies = [
+ "about-window",
  "appstore-service",
  "dirs",
  "embed-resource",

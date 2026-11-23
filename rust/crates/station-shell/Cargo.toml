@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+about-window = { path = "../about-window" }
 appstore-service = { path = "../appstore-service" }
 dirs = "7"
 manifest-registry = { path = "../manifest-registry" }

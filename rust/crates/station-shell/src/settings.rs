@@ -128,6 +128,40 @@ fn general(state: &ShellState, p: Paint) -> El {
             p,
         ));
     }
+    rows.push(
+        row()
+            .key("settings-about-row")
+            .h(36.0)
+            .px(space::S3)
+            .center_y()
+            .justify_between()
+            .child(
+                text("About Station")
+                    .font(type_::BODY)
+                    .color(p.t.text)
+                    .a11y_hidden(),
+            )
+            .child(
+                el().key("settings-open-about")
+                    .role("button")
+                    .label("About Station")
+                    .focusable(true)
+                    .h(26.0)
+                    .px(space::S2)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(p.t.control_track)
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| state.open_about())
+                    .child(
+                        text("Open")
+                            .font(type_::LABEL)
+                            .color(p.t.text)
+                            .a11y_hidden(),
+                    ),
+            ),
+    );
     section("settings-general", "General", p, rows)
 }
 
