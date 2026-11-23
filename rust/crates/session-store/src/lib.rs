@@ -42,6 +42,12 @@ pub const MAX_IDENTITIES: usize = 32;
 /// email or display name is tens of characters; 256 is generous and bounded.
 pub const MAX_IDENTITY_FIELD_CHARS: usize = 256;
 
+/// The most pinned favorites a session may store.
+pub const MAX_FAVORITES: usize = 256;
+
+/// Maximum characters per field on a pinned [`FavoriteEntry`].
+pub const MAX_FAVORITE_FIELD_CHARS: usize = 2048;
+
 /// The window size a session may ask for, in points. Smaller is raised to the minimum, larger is
 /// clamped: a hostile document cannot open a 10,000,000-pixel window.
 ///
@@ -132,6 +138,21 @@ pub struct SessionState {
     /// that does not know the field ignores it — the format version stays 1.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app_config: BTreeMap<String, AppConfigEntry>,
+    /// Pinned favorites shown at the top of the Bang Quick Switcher (Slice 28).
+    ///
+    /// Added to format 1 after it shipped: `#[serde(default)]` keeps existing documents readable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorites: Vec<FavoriteEntry>,
+}
+
+/// One pinned favorite belonging to an installed application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteEntry {
+    pub id: String,
+    pub application_id: String,
+    pub title: String,
+    pub url: String,
 }
 
 /// One signed-in profile: the stored half of `StationUserIdentity`
@@ -305,6 +326,12 @@ pub enum StoreError {
         identity_id: String,
         why: &'static str,
     },
+    /// One pinned favorite cannot be used: empty/control/oversized field, duplicate id, or
+    /// referencing an uninstalled application.
+    BadFavorite {
+        favorite_id: String,
+        why: &'static str,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -344,6 +371,10 @@ impl std::fmt::Display for StoreError {
                 f,
                 "session store identity {identity_id} is not usable: {why}"
             ),
+            StoreError::BadFavorite { favorite_id, why } => write!(
+                f,
+                "session store favorite {favorite_id} is not usable: {why}"
+            ),
         }
     }
 }
@@ -358,7 +389,8 @@ impl std::error::Error for StoreError {
             | StoreError::TooManyEntries { .. }
             | StoreError::BadConfig { .. }
             | StoreError::BadRailOrder { .. }
-            | StoreError::BadIdentity { .. } => None,
+            | StoreError::BadIdentity { .. }
+            | StoreError::BadFavorite { .. } => None,
         }
     }
 }
@@ -506,6 +538,56 @@ fn sanitize(state: &mut SessionState) -> Result<(), StoreError> {
             return Err(StoreError::BadIdentity {
                 identity_id: identity_id.clone(),
                 why,
+            });
+        }
+    }
+    if state.favorites.len() > MAX_FAVORITES {
+        return Err(StoreError::TooManyEntries {
+            field: "favorite",
+            count: state.favorites.len(),
+            max: MAX_FAVORITES,
+        });
+    }
+    let mut seen_favorites: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for favorite in &state.favorites {
+        if favorite.id.trim().is_empty()
+            || favorite.application_id.trim().is_empty()
+            || favorite.title.trim().is_empty()
+            || favorite.url.trim().is_empty()
+        {
+            return Err(StoreError::BadFavorite {
+                favorite_id: favorite.id.clone(),
+                why: "a required favorite field is empty",
+            });
+        }
+        if [
+            favorite.id.as_str(),
+            favorite.application_id.as_str(),
+            favorite.title.as_str(),
+            favorite.url.as_str(),
+        ]
+        .iter()
+        .any(|v| v.chars().count() > MAX_FAVORITE_FIELD_CHARS || v.chars().any(char::is_control))
+        {
+            return Err(StoreError::BadFavorite {
+                favorite_id: favorite.id.clone(),
+                why: "a favorite field contains control characters or exceeds 2048 characters",
+            });
+        }
+        if !seen_favorites.insert(favorite.id.as_str()) {
+            return Err(StoreError::BadFavorite {
+                favorite_id: favorite.id.clone(),
+                why: "the favorite id appears twice",
+            });
+        }
+        if !state
+            .installed
+            .iter()
+            .any(|application| application.application_id == favorite.application_id)
+        {
+            return Err(StoreError::BadFavorite {
+                favorite_id: favorite.id.clone(),
+                why: "the favorite references an application that is not installed",
             });
         }
     }

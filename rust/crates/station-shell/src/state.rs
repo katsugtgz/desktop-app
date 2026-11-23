@@ -41,6 +41,8 @@ pub enum Surface {
     Notifications,
     /// The About Station screen, filling the content area.
     About,
+    /// The Bang Quick Switcher palette (`Ctrl+K` / `Ctrl+T`), filling the content area.
+    QuickSwitch,
 }
 
 /// The user's private-manifest store, or an in-memory one when the config dir cannot be opened:
@@ -320,6 +322,12 @@ pub struct ShellState {
     tab_menu: Option<String>,
     /// In-tab search bar state (`Ctrl+F` / `Cmd+F`; transient, never persisted).
     find: crate::find::FindState,
+    /// Pinned favorites persisted in the session document (Slice 28).
+    favorites: Vec<session_store::FavoriteEntry>,
+    /// In-memory frecency scorer (`activity::frecency`) driving Quick Switcher ranking.
+    frecency: activity::frecency::Frecency,
+    /// Bang Quick Switcher palette state (`Ctrl+K` / `Ctrl+T`; transient).
+    quick_switch: crate::quick_switch::QuickSwitchState,
 }
 
 /// The settings editor's draft for one installed application.
@@ -410,6 +418,11 @@ impl ShellState {
             zoom: BTreeMap::new(),
             tab_menu: None,
             find: crate::find::FindState::default(),
+            favorites: Vec::new(),
+            frecency: activity::frecency::Frecency::new(
+                activity::frecency::FrecencyOptions::default(),
+            ),
+            quick_switch: crate::quick_switch::QuickSwitchState::default(),
         };
         state.rebuild_tabs();
         state
@@ -453,6 +466,7 @@ impl ShellState {
         let theme = stored.theme;
         let rail_order = std::mem::take(&mut stored.rail_order);
         let identities = std::mem::take(&mut stored.identities);
+        let favorites = std::mem::take(&mut stored.favorites);
         let mut service = service;
         let mut replayed = true;
         if !(stored.installed.is_empty() && stored.dock.is_empty() && stored.tabs.is_empty()) {
@@ -470,6 +484,9 @@ impl ShellState {
         state.theme = theme;
         state.start_at_login = stored.start_at_login;
         state.identities = identities;
+        if replayed {
+            state.favorites = favorites;
+        }
         state.save_blocked = !readable || !replayed;
         // The order is the user's when it names exactly the docked applications (the document's
         // own validation guarantees that shape); anything else falls back to install order, and
@@ -652,9 +669,183 @@ impl ShellState {
                 self.find.reset_matches();
                 crate::webview::eval_in_tab(&previous, crate::find::CLEAR_SCRIPT);
             }
+            if !self.active().renders_in_rune() {
+                let frec_id = format!("tab:{}", self.active);
+                self.frecency.save(activity::frecency::SaveParams {
+                    search_query: None,
+                    selected_id: &frec_id,
+                    date_selection: None,
+                });
+            }
             self.persist();
         }
         true
+    }
+
+    /// Pinned favorites persisted in the session document.
+    pub fn favorites(&self) -> &[session_store::FavoriteEntry] {
+        &self.favorites
+    }
+
+    /// True if `tab_id` currently has a pinned favorite.
+    pub fn is_favorite(&self, tab_id: &str) -> bool {
+        self.favorites
+            .iter()
+            .any(|fav| fav.application_id == tab_id)
+    }
+
+    /// Pins or unpins `tab_id` as a favorite and persists the session immediately.
+    pub fn toggle_favorite_for_tab(&mut self, tab_id: &str) -> bool {
+        if let Some(pos) = self
+            .favorites
+            .iter()
+            .position(|fav| fav.application_id == tab_id)
+        {
+            self.favorites.remove(pos);
+            self.persist();
+            return true;
+        }
+        if self.favorites.len() >= session_store::MAX_FAVORITES {
+            return false;
+        }
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id && t.kind == TabKind::Web)
+        else {
+            return false;
+        };
+        let title: String = tab
+            .display_label()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(session_store::MAX_FAVORITE_FIELD_CHARS)
+            .collect();
+        let url: String = tab
+            .url
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(session_store::MAX_FAVORITE_FIELD_CHARS)
+            .collect();
+        if title.trim().is_empty() || url.trim().is_empty() {
+            return false;
+        }
+        self.favorites.push(session_store::FavoriteEntry {
+            id: format!("fav-{tab_id}"),
+            application_id: tab_id.to_owned(),
+            title,
+            url,
+        });
+        self.persist();
+        true
+    }
+
+    /// Opens the Bang Quick Switcher palette (`Ctrl+K` / `Ctrl+T`).
+    pub fn open_quick_switch(&mut self) {
+        self.close_find();
+        self.close_tab_menu();
+        self.surface = Surface::QuickSwitch;
+        self.config_draft = None;
+        self.notifications
+            .apply(NotificationAction::SetVisibility { visible: false });
+        self.quick_switch.reset();
+    }
+
+    /// Current Quick Switcher palette state.
+    pub fn quick_switch(&self) -> &crate::quick_switch::QuickSwitchState {
+        &self.quick_switch
+    }
+
+    /// Mutable access to the Quick Switcher search field.
+    pub fn quick_switch_edit_mut(&mut self) -> &mut TextEdit {
+        &mut self.quick_switch.edit
+    }
+
+    /// Resets the highlighted Quick Switcher row back to the first result after query edits.
+    pub fn reset_quick_switch_selection(&mut self) {
+        self.quick_switch.selected = 0;
+    }
+
+    /// Moves Quick Switcher selection up (`-1`) or down (`+1`), wrapping across entries.
+    pub fn move_quick_switch_selection(&mut self, delta: isize) {
+        let len = crate::quick_switch::entries_for(self).len();
+        if len == 0 {
+            self.quick_switch.selected = 0;
+            return;
+        }
+        let current = self.quick_switch.selected.min(len - 1) as isize;
+        let next = (current + delta).rem_euclid(len as isize) as usize;
+        self.quick_switch.selected = next;
+    }
+
+    /// Activates the currently highlighted Quick Switcher entry (Enter).
+    pub fn submit_quick_switch(&mut self) {
+        let entries = crate::quick_switch::entries_for(self);
+        if entries.is_empty() {
+            return;
+        }
+        let idx = self.quick_switch.selected.min(entries.len() - 1);
+        let entry = entries[idx].clone();
+        self.activate_quick_switch_entry(&entry.frecency_id, entry.action);
+    }
+
+    /// Records the Quick Switcher selection in `activity::frecency` and executes its action.
+    pub fn activate_quick_switch_entry(
+        &mut self,
+        frecency_id: &str,
+        action: crate::quick_switch::QuickSwitchAction,
+    ) {
+        let query = self.quick_switch.query().to_owned();
+        self.frecency.save(activity::frecency::SaveParams {
+            search_query: (!query.is_empty()).then_some(query.as_str()),
+            selected_id: frecency_id,
+            date_selection: None,
+        });
+        match action {
+            crate::quick_switch::QuickSwitchAction::OpenFavorite {
+                favorite_id: _,
+                application_id,
+                url,
+            } => {
+                self.close_overlay();
+                self.select(&application_id);
+                if !url.is_empty() && self.tab_url(&application_id) != Some(url.as_str()) {
+                    crate::webview::load_if_attached(&application_id, &url);
+                }
+            }
+            crate::quick_switch::QuickSwitchAction::SelectTab { tab_id } => {
+                self.close_overlay();
+                self.select(&tab_id);
+            }
+            crate::quick_switch::QuickSwitchAction::OpenStore => {
+                self.close_overlay();
+                self.open_app_store();
+            }
+            crate::quick_switch::QuickSwitchAction::OpenSettings => {
+                self.open_settings();
+            }
+            crate::quick_switch::QuickSwitchAction::OpenNotifications => {
+                self.surface = Surface::Apps;
+                self.toggle_notifications();
+            }
+            crate::quick_switch::QuickSwitchAction::OpenAbout => {
+                self.open_about();
+            }
+            crate::quick_switch::QuickSwitchAction::InstallApp { manifest_url } => {
+                self.close_overlay();
+                self.install(&manifest_url);
+            }
+        }
+    }
+
+    /// Computes a frecency score for `result_id` under `query`.
+    pub fn frecency_score(&self, query: &str, result_id: &str) -> f64 {
+        self.frecency.compute_score(query, result_id)
+    }
+
+    /// Searches the App Store catalog (public + private manifests) for Quick Switcher install hits.
+    pub fn search_catalog(&self, query: &str) -> Vec<MinimalApplication> {
+        search_applications(query, &self.private)
     }
 
     /// Current in-tab find bar state (`Ctrl+F` / `Cmd+F`).
@@ -835,6 +1026,8 @@ impl ShellState {
             self.tab_menu = None;
         }
         self.zoom.remove(application_id);
+        self.favorites
+            .retain(|fav| fav.application_id != application_id);
         // Rebuilding drops the row and, when it was the active tab, falls back to the App Store.
         self.rebuild_tabs();
         self.persist();
@@ -1831,6 +2024,16 @@ impl ShellState {
             // Accounts ride the document unchanged: this slice has no writer besides the (later)
             // sign-in, and dropping them on any user action would lose them.
             identities: self.identities.clone(),
+            favorites: self
+                .favorites
+                .iter()
+                .filter(|fav| {
+                    self.store
+                        .installed_applications()
+                        .contains_key(&fav.application_id)
+                })
+                .cloned()
+                .collect(),
         }
     }
 }

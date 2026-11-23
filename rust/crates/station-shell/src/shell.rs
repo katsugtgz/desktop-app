@@ -30,11 +30,36 @@ impl Paint {
     }
 }
 
-/// Keys no control took: global shortcuts matching Station's keymap (`Escape`, find, reload,
-/// back, forward, zoom, Settings, tab jump 1..9).
+/// Keys no control took: global shortcuts matching Station's keymap (`Escape`, Quick Switcher
+/// `Ctrl+K`/`Ctrl+T`, find, reload, back, forward, zoom, Settings, tab jump 1..9).
 pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
     if event.key == rune::Key::Escape {
         return state.close_find() || state.close_tab_menu() || state.close_overlay();
+    }
+    if event.is_command('k') || event.is_command('t') {
+        if state.surface() == Surface::QuickSwitch {
+            state.close_overlay();
+        } else {
+            state.open_quick_switch();
+        }
+        return true;
+    }
+    if state.surface() == Surface::QuickSwitch {
+        match event.key {
+            rune::Key::Up => {
+                state.move_quick_switch_selection(-1);
+                return true;
+            }
+            rune::Key::Down => {
+                state.move_quick_switch_selection(1);
+                return true;
+            }
+            rune::Key::Enter => {
+                state.submit_quick_switch();
+                return true;
+            }
+            _ => {}
+        }
     }
     if event.is_command(',') {
         state.open_settings();
@@ -98,6 +123,7 @@ pub fn view_themed(state: &ShellState, dark: bool) -> El {
     let body = match state.surface() {
         Surface::Settings => settings::view(state, p),
         Surface::About => crate::about::view(state, p),
+        Surface::QuickSwitch => crate::quick_switch::view(state, p),
         Surface::Apps | Surface::Notifications => {
             let app = if state.active().renders_in_rune() {
                 appstore::view(state, p)

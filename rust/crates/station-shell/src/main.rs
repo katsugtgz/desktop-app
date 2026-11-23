@@ -25,6 +25,7 @@ mod oauth;
 mod placeholder;
 #[cfg(target_os = "windows")]
 mod platform_icon;
+mod quick_switch;
 mod rail;
 mod routing;
 mod session;
@@ -91,6 +92,9 @@ mod tests_shortcuts;
 #[cfg(test)]
 mod tests_find;
 
+#[cfg(test)]
+mod tests_quick_switch;
+
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
@@ -126,6 +130,7 @@ fn main() {
             ("settings", |state| state.open_settings()),
             ("notifications", |state| state.toggle_notifications()),
             ("about", |state| state.open_about()),
+            ("quick-switch", |state| state.open_quick_switch()),
         ],
         ..rune::AppSpec::new(
             "Station",

@@ -87,6 +87,12 @@ fn full_state() -> SessionState {
         start_at_login: true,
         app_config: BTreeMap::new(),
         identities: BTreeMap::new(),
+        favorites: vec![session_store::FavoriteEntry {
+            id: "fav-slack-1".to_owned(),
+            application_id: "slack".to_owned(),
+            title: "Slack General".to_owned(),
+            url: "https://app.slack.com/client".to_owned(),
+        }],
     }
 }
 
@@ -965,4 +971,40 @@ fn a_duplicate_identity_key_is_refused_on_load() {
         other => panic!("expected BadIdentity, got {other:?}"),
     }
     assert_eq!(read_bytes(&path), before, "a refused load rewrote the file");
+}
+
+#[test]
+fn favorites_refuse_unknown_apps_duplicates_and_control_chars() {
+    let dir = TempDir::new("favorites-validation");
+    let store = dir.store();
+
+    // Unknown application refused whole
+    let mut bad_app = full_state();
+    bad_app.favorites.push(session_store::FavoriteEntry {
+        id: "fav-ghost".to_owned(),
+        application_id: "not-installed".to_owned(),
+        title: "Ghost".to_owned(),
+        url: "https://example.com".to_owned(),
+    });
+    assert!(matches!(
+        store.save(&bad_app),
+        Err(StoreError::BadFavorite { favorite_id, .. }) if favorite_id == "fav-ghost"
+    ));
+
+    // Duplicate id refused
+    let mut dup = full_state();
+    let copy = dup.favorites[0].clone();
+    dup.favorites.push(copy);
+    assert!(matches!(
+        store.save(&dup),
+        Err(StoreError::BadFavorite { favorite_id, .. }) if favorite_id == "fav-slack-1"
+    ));
+
+    // Control characters refused
+    let mut ctrl = full_state();
+    ctrl.favorites[0].title = "Slack\nInject".to_owned();
+    assert!(matches!(
+        store.save(&ctrl),
+        Err(StoreError::BadFavorite { .. })
+    ));
 }

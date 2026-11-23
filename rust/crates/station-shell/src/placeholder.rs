@@ -30,6 +30,12 @@ pub fn top_bar(state: &ShellState, p: Paint) -> El {
         let back_id = tab.id.clone();
         let fwd_id = tab.id.clone();
         let reload_id = tab.id.clone();
+        let fav_id = tab.id.clone();
+        let fav_caption = if state.is_favorite(&tab.id) {
+            "Starred"
+        } else {
+            "Star"
+        };
         let ext_url = tab.url.clone();
         let menu_id = tab.id.clone();
         right = right
@@ -45,6 +51,15 @@ pub fn top_bar(state: &ShellState, p: Paint) -> El {
             .child(bar_btn("topbar-find", "Find in page", "Find", p, |state| {
                 state.open_find();
             }))
+            .child(bar_btn(
+                "topbar-favorite",
+                "Toggle favorite",
+                fav_caption,
+                p,
+                move |state| {
+                    state.toggle_favorite_for_tab(&fav_id);
+                },
+            ))
             .child(bar_btn(
                 "topbar-open-browser",
                 "Open in browser",
@@ -64,6 +79,15 @@ pub fn top_bar(state: &ShellState, p: Paint) -> El {
                 },
             ));
     }
+    right = right.child(bar_btn(
+        "topbar-quick-switch",
+        "Quick Switcher",
+        "Jump",
+        p,
+        |state| {
+            state.open_quick_switch();
+        },
+    ));
 
     row()
         .key("topbar")
@@ -97,6 +121,12 @@ pub fn tab_actions_bar(state: &ShellState, p: Paint) -> Option<El> {
         .find(|t| t.id == target_id && t.kind == TabKind::Web)?;
 
     let id_reload = tab.id.clone();
+    let id_fav = tab.id.clone();
+    let fav_action_caption = if state.is_favorite(&tab.id) {
+        "Unpin favorite"
+    } else {
+        "Pin favorite"
+    };
     let ext_url = tab.url.clone();
     let id_cfg = tab.id.clone();
     let id_up = tab.id.clone();
@@ -126,6 +156,15 @@ pub fn tab_actions_bar(state: &ShellState, p: Paint) -> Option<El> {
             move |state| {
                 crate::webview::reload(&id_reload);
                 state.close_tab_menu();
+            },
+        ))
+        .child(bar_btn(
+            "tab-action-favorite",
+            "Toggle favorite",
+            fav_action_caption,
+            p,
+            move |state| {
+                state.toggle_favorite_for_tab(&id_fav);
             },
         ))
         .child(bar_btn(

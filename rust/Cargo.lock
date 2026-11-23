@@ -4276,6 +4276,7 @@ name = "station-shell"
 version = "0.1.0"
 dependencies = [
  "about-window",
+ "activity",
  "appstore-service",
  "base64 0.22.1",
  "dirs",
