@@ -83,7 +83,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
       if (index !== -1) clickListeners.splice(index, 1);
     },
   };
-  Object.defineProperty(window, 'bxApi', { value: Object.freeze({ notificationCenter: Object.freeze(api) }) }));
+  Object.defineProperty(window, 'bxApi', { value: Object.freeze({ notificationCenter: Object.freeze(api) }) });
 
   // The page's Notification API, overridden at initialization-script time (the page's first
   // line sees it, unlike Electron's dom-ready executeJavaScript).

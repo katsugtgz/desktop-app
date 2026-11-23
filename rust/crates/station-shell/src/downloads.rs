@@ -125,9 +125,11 @@ pub fn sanitize_file_name(suggested: &str) -> Option<String> {
     }
 
     let (stem, extension) = split_extension(cleaned);
-    // "CON" and "con.txt" are the same device on Windows; the stem is what counts.
+    // "CON", "con.txt" and "NUL.tar.gz" are all the same reserved device on Windows: the base
+    // name before the *first* dot is what Windows treats as the device name.
+    let device_stem = cleaned.split('.').next().unwrap_or("");
     if RESERVED_NAMES.contains(
-        &stem
+        &device_stem
             .trim_end_matches([' ', '.'])
             .to_ascii_uppercase()
             .as_str(),
@@ -280,6 +282,7 @@ pub fn finished(url: &str, path: Option<&Path>, _success: bool) {
 }
 
 /// How many downloads are reserved right now (a test seam; the shell never asks).
+#[cfg(test)]
 pub fn in_flight() -> usize {
     reservations().len()
 }

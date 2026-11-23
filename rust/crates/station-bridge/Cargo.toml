@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 appstore-service = { path = "../appstore-service" }
 manifest-registry = { path = "../manifest-registry" }
-napi = { version = "3", default-features = false, features = ["napi4", "serde-json"] }
+napi = { version = "3", default-features = false, features = ["napi4", "serde-json", "dyn-symbols"] }
 napi-derive = "3"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

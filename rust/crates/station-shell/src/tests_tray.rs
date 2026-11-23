@@ -198,7 +198,7 @@ fn the_tray_icon_decodes_from_the_embedded_ico() {
 fn the_window_icon_asset_holds_both_sizes() {
     // Moved with the parser: the window icon's own asset still parses to the 32/64 entries and
     // their `RT_ICON` headers (doubled `biHeight` for the AND mask).
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/app/build/icon.ico");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/station.ico");
     let bytes = std::fs::read(path).expect("the window icon asset is in the repo");
     let entries = ico::entries(&bytes).expect("the window icon parses");
     for size in [32u32, 64] {
@@ -388,31 +388,53 @@ fn the_settings_toggle_draws_and_follows_the_state() {
     press(&mut rt, "rail-settings");
     draw(&mut rt);
 
-    assert!(rt.find("settings-start-at-login").is_some(), "no login row");
-    assert_eq!(
-        element_text(&rt, "settings-start-at-login-value").as_deref(),
-        Some("Off")
-    );
+    if autolaunch::supported() {
+        assert!(rt.find("settings-start-at-login").is_some(), "no login row");
+        assert_eq!(
+            element_text(&rt, "settings-start-at-login-value").as_deref(),
+            Some("Off")
+        );
+    } else {
+        assert!(
+            rt.find("settings-start-at-login").is_none(),
+            "non-Windows platforms must not draw a stub login row"
+        );
+    }
     assert!(rt.find("settings-start-at-login-error").is_none());
 
     rt.state
         .set_start_at_login(true, &FakeLoginItem::new(false));
     rt.invalidate();
     draw(&mut rt);
-    assert_eq!(
-        element_text(&rt, "settings-start-at-login-value").as_deref(),
-        Some("On")
+    assert!(
+        settings::start_at_login_model(&rt.state, true)
+            .expect("model")
+            .on
     );
+    if autolaunch::supported() {
+        assert_eq!(
+            element_text(&rt, "settings-start-at-login-value").as_deref(),
+            Some("On")
+        );
+    }
 
     rt.state
         .set_start_at_login(false, &FakeLoginItem::failing());
     rt.invalidate();
     draw(&mut rt);
-    assert_eq!(
-        element_text(&rt, "settings-start-at-login-value").as_deref(),
-        Some("On"),
+    assert!(
+        settings::start_at_login_model(&rt.state, true)
+            .expect("model")
+            .on,
         "the failed write did not flip the toggle"
     );
+    if autolaunch::supported() {
+        assert_eq!(
+            element_text(&rt, "settings-start-at-login-value").as_deref(),
+            Some("On"),
+            "the failed write did not flip the toggle"
+        );
+    }
     let why = element_text(&rt, "settings-start-at-login-error-text").expect("the error row");
     assert!(why.contains("denied"), "the row says why: {why}");
 }

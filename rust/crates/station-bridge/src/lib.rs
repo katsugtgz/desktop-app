@@ -33,6 +33,7 @@ use napi_derive::napi;
 use serde_json::{json, Map, Value};
 
 mod watchers;
+#[cfg_attr(test, allow(dead_code))]
 mod watchers_napi;
 
 /// Process-global service state, initialized on first use.

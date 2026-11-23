@@ -32,11 +32,16 @@
 //! the port is unreachable from off-machine; the token is a gate against other local processes,
 //! not a secret from the user's own account.
 
+#[cfg(target_os = "windows")]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(any(target_os = "windows", test))]
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
+use std::time::Duration;
+use std::time::Instant;
 
 use serde::Deserialize;
 

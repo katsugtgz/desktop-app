@@ -708,17 +708,30 @@ fn a_selection_is_written_immediately_and_the_last_one_wins() {
 
 #[test]
 fn reselecting_the_active_tab_does_not_write_again() {
-    let path = session_path("reselect");
+    let dir = std::env::temp_dir().join(format!(
+        "station-shell-reselect-dir-{}-{}",
+        std::process::id(),
+        NEXT_STORE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
     let mut rt = runtime(launched(&path), true);
     draw(&mut rt);
     assert!(rt.state.install("station-manifest://14")); // writes at once
     let gmail = rt.state.active().id.clone();
     let other = rt.state.tabs()[0].id.clone();
 
-    // Make every later write fail: an attempted write becomes a `save_failures` count.
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_readonly(true);
-    std::fs::set_permissions(&path, permissions).unwrap();
+    // Make every later write fail on both Windows (file readonly blocks rename) and Unix
+    // (directory readonly blocks temp file creation): an attempted write becomes a `save_failures` count.
+    let mut file_perms = std::fs::metadata(&path).unwrap().permissions();
+    file_perms.set_readonly(true);
+    std::fs::set_permissions(&path, file_perms).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
 
     assert!(rt.state.select(&gmail));
     assert!(rt.state.select(&gmail));
@@ -734,6 +747,14 @@ fn reselecting_the_active_tab_does_not_write_again() {
         1,
         "a real selection did not write at once"
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]
@@ -822,14 +843,27 @@ fn a_session_with_a_hostile_window_size_snaps_without_panicking() {
 
 #[test]
 fn a_failing_save_keeps_the_shell_running_and_retries_on_the_next_action() {
-    let path = session_path("save-failure");
+    let dir = std::env::temp_dir().join(format!(
+        "station-shell-savefail-dir-{}-{}",
+        std::process::id(),
+        NEXT_STORE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
     let mut rt = runtime(launched(&path), true);
     draw(&mut rt);
     rt.state.install("station-manifest://14");
-    // Make the file read-only: the next write fails like a full or read-only disk.
+    // Make the destination unwritable on both Windows and Unix: the next write fails like a full
+    // or read-only disk.
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_readonly(true);
     std::fs::set_permissions(&path, permissions).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
 
     assert!(rt.state.install("station-manifest://157"));
     assert_eq!(rt.state.save_failures(), 1, "the failure was not recorded");
@@ -842,9 +876,13 @@ fn a_failing_save_keeps_the_shell_running_and_retries_on_the_next_action() {
         "the next user action did not retry the write"
     );
 
-    // Leave the read-only file for the temp dir's cleaner: no portable way to clear it is worth
-    // the warning, and the path is unique to this run.
-    let _ = &path;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]

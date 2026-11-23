@@ -30,8 +30,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::ico;
 
-/// Station's icon, at compile time, from the Electron build's own asset.
-static ICON_ICO: &[u8] = include_bytes!("../../../../packages/app/build/icon.ico");
+/// Station's icon, at compile time, from `rust/assets/station.ico` (P0 decoupled copy).
+static ICON_ICO: &[u8] = include_bytes!("../../../assets/station.ico");
 
 /// The sizes one window gets: (width, height) pairs, small first.
 const SIZES: [(u32, u32); 2] = [(32, 32), (64, 64)];

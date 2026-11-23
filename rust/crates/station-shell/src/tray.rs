@@ -17,6 +17,7 @@
 //! Windows only: the shell calls [`start`] only there. On other platforms Rune reports
 //! `TrayError::Unsupported` and no tray is started (the web view's discipline: no stub).
 
+#[cfg(target_os = "windows")]
 use crate::state::ShellState;
 
 /// The tooltip Electron set: `tray.setToolTip('Station')`.

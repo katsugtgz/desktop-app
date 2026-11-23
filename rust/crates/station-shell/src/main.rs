@@ -6,6 +6,10 @@
 //! [`placeholder`] draws the top bar and pane, and [`shell`] composes them into the `El` an
 //! `AppSpec` renders.
 
+// On non-Windows hosts the WebView2/tray/Win32 entry points are stubbed out, leaving helper types
+// and methods exercised only by Windows or unit tests. Keep full dead-code checking on Windows.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 mod appstore;
 mod autolaunch;
 mod deep_link;
