@@ -13,6 +13,7 @@
 mod about;
 mod appstore;
 mod autolaunch;
+mod crash;
 mod deep_link;
 mod dialogs;
 mod downloads;
@@ -22,6 +23,7 @@ mod icons;
 mod instance;
 mod notifications;
 mod oauth;
+mod permissions;
 mod placeholder;
 #[cfg(target_os = "windows")]
 mod platform_icon;
@@ -103,6 +105,9 @@ fn main() {
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
     // opens the web view stack at all.
     instance::handoff_if_secondary();
+
+    // Local, bounded, secret-free panic diagnostics under `<config>/station/crashes/`.
+    crash::install_panic_hook();
 
     // The window opens where the session left it: the size is the spec's, the position is
     // applied once the native window exists, and maximized is the app's own launch flag.

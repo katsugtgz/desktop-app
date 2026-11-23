@@ -1244,6 +1244,9 @@ mod platform {
                         path.as_deref(),
                     ));
                 })
+                // Least-privilege permission policy (Slice 30): denies WebView2 Notifications
+                // (routed via INIT_SCRIPT) and silent/privileged APIs; prompts interactive media.
+                .with_permission_handler(crate::permissions::decide_wry)
                 .with_bounds(bounds)
                 .with_visible(false)
                 .with_focused(false)
