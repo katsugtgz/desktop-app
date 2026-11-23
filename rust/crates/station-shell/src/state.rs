@@ -314,6 +314,10 @@ pub struct ShellState {
     oauth_config: Option<crate::oauth::OAuthConfig>,
     /// Transient sign-in status or error message shown in Settings (never persisted).
     oauth_status: Option<String>,
+    /// Per-tab zoom factor (`0.5..=3.0`, default `1.0`; transient, never persisted).
+    zoom: BTreeMap<String, f64>,
+    /// Tab id whose Rune tab-actions strip is open (right-click on rail or top-bar `•••`).
+    tab_menu: Option<String>,
 }
 
 /// The settings editor's draft for one installed application.
@@ -401,6 +405,8 @@ impl ShellState {
             about_state: about_window::AboutWindowState::default(),
             oauth_config: crate::oauth::OAuthConfig::from_env(),
             oauth_status: None,
+            zoom: BTreeMap::new(),
+            tab_menu: None,
         };
         state.rebuild_tabs();
         state
@@ -636,10 +642,84 @@ impl ShellState {
         if !self.set_active(id) {
             return false;
         }
+        self.tab_menu = None;
         if self.active != previous {
             self.persist();
         }
         true
+    }
+
+    /// Selects a tab by 1-based rail index (`Cmd/Ctrl+1..9`), closing any open overlay.
+    pub fn select_by_index(&mut self, one_based: usize) -> bool {
+        let Some(index) = one_based.checked_sub(1) else {
+            return false;
+        };
+        let Some(tab_id) = self.tabs.get(index).map(|tab| tab.id.clone()) else {
+            return false;
+        };
+        if self.surface != Surface::Apps {
+            self.close_overlay();
+        }
+        self.select(&tab_id)
+    }
+
+    /// Per-tab zoom factor (`0.5..=3.0`, defaults to `1.0`).
+    pub fn zoom_of(&self, tab_id: &str) -> f64 {
+        self.zoom.get(tab_id).copied().unwrap_or(1.0)
+    }
+
+    /// Adjusts `tab_id`'s zoom factor by `delta`, clamped to `0.5..=3.0`, returning the new value.
+    pub fn adjust_zoom(&mut self, tab_id: &str, delta: f64) -> f64 {
+        let current = self.zoom_of(tab_id);
+        let next = ((current + delta) * 10.0).round() / 10.0;
+        let clamped = next.clamp(0.5, 3.0);
+        self.zoom.insert(tab_id.to_owned(), clamped);
+        clamped
+    }
+
+    /// Resets `tab_id`'s zoom factor to `1.0`.
+    pub fn reset_zoom(&mut self, tab_id: &str) -> f64 {
+        self.zoom.insert(tab_id.to_owned(), 1.0);
+        1.0
+    }
+
+    /// The tab id whose Rune tab-actions strip is currently open, if any.
+    pub fn tab_menu_for(&self) -> Option<&str> {
+        self.tab_menu.as_deref()
+    }
+
+    /// Toggles the tab-actions strip for a web tab (right-click on rail or top-bar menu button).
+    pub fn toggle_tab_menu(&mut self, tab_id: &str) -> bool {
+        if self.tab_menu.as_deref() == Some(tab_id) {
+            self.tab_menu = None;
+            return true;
+        }
+        if !self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.kind == TabKind::Web)
+        {
+            return false;
+        }
+        self.tab_menu = Some(tab_id.to_owned());
+        true
+    }
+
+    /// Closes the tab-actions strip; returns true if one was open.
+    pub fn close_tab_menu(&mut self) -> bool {
+        self.tab_menu.take().is_some()
+    }
+
+    /// Whether `application_id` can move up (`up == true`) or down (`up == false`) in the rail.
+    pub fn can_move_rail_row(&self, application_id: &str, up: bool) -> bool {
+        let Some(index) = self.rail_order.iter().position(|id| id == application_id) else {
+            return false;
+        };
+        if up {
+            index > 0
+        } else {
+            index + 1 < self.rail_order.len()
+        }
     }
 
     /// `select` without writing the session: launch restores the active application with it.
@@ -683,6 +763,10 @@ impl ShellState {
         if self.store.uninstall(application_id).is_err() {
             return false;
         }
+        if self.tab_menu.as_deref() == Some(application_id) {
+            self.tab_menu = None;
+        }
+        self.zoom.remove(application_id);
         // Rebuilding drops the row and, when it was the active tab, falls back to the App Store.
         self.rebuild_tabs();
         self.persist();

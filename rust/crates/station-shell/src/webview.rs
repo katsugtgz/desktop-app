@@ -299,6 +299,10 @@ pub trait WebviewHost {
     /// Evaluate an arbitrary shell-generated script inside an attached page (snooze fan-out,
     /// history navigation, in-tab search).
     fn eval_script(&mut self, tab_id: &str, script: &str) -> Result<(), WebviewError>;
+    /// Reload an attached page in place.
+    fn reload(&mut self, tab_id: &str) -> Result<(), WebviewError>;
+    /// Apply a zoom scale factor (`0.5..=3.0`) to an attached page.
+    fn set_zoom(&mut self, tab_id: &str, factor: f64) -> Result<(), WebviewError>;
     /// The window's scale changed: later bounds are converted with it.
     fn set_scale(&mut self, scale: f32);
     /// Show or hide an attached page without destroying it.
@@ -717,6 +721,63 @@ pub fn sync_snooze(duration_ms: Option<u64>) {
         for tab in tabs {
             let _ = engine.host.eval_script(&tab, &script);
         }
+    });
+}
+
+/// Evaluates a shell-generated script inside `tab_id` if it is attached.
+pub fn eval_in_tab(tab_id: &str, script: &str) {
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let Some(engine) = engine.as_mut() else {
+            return;
+        };
+        if engine.closed || !engine.session.bounds.contains_key(tab_id) {
+            return;
+        }
+        let _ = engine.host.eval_script(tab_id, script);
+    });
+}
+
+/// Reloads an attached web tab in place.
+pub fn reload(tab_id: &str) {
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let Some(engine) = engine.as_mut() else {
+            return;
+        };
+        if engine.closed || !engine.session.bounds.contains_key(tab_id) {
+            return;
+        }
+        let _ = engine.host.reload(tab_id);
+    });
+}
+
+/// Navigates back in the attached page's history.
+pub fn go_back(tab_id: &str) {
+    eval_in_tab(tab_id, "window.history.back();");
+}
+
+/// Navigates forward in the attached page's history.
+pub fn go_forward(tab_id: &str) {
+    eval_in_tab(tab_id, "window.history.forward();");
+}
+
+/// Sets the zoom factor (`0.5..=3.0`) on an attached page.
+pub fn set_zoom(tab_id: &str, factor: f64) {
+    let clamped = if factor.is_finite() {
+        factor.clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let Some(engine) = engine.as_mut() else {
+            return;
+        };
+        if engine.closed || !engine.session.bounds.contains_key(tab_id) {
+            return;
+        }
+        let _ = engine.host.set_zoom(tab_id, clamped);
     });
 }
 
@@ -1220,6 +1281,22 @@ mod platform {
                 .map_err(|why| WebviewError::Failed(format!("eval in {tab_id}: {why}")))
         }
 
+        fn reload(&mut self, tab_id: &str) -> Result<(), WebviewError> {
+            self.views
+                .get(tab_id)
+                .ok_or_else(|| WebviewError::Failed(format!("no web view for {tab_id}")))?
+                .reload()
+                .map_err(|why| WebviewError::Failed(format!("reload {tab_id}: {why}")))
+        }
+
+        fn set_zoom(&mut self, tab_id: &str, factor: f64) -> Result<(), WebviewError> {
+            self.views
+                .get(tab_id)
+                .ok_or_else(|| WebviewError::Failed(format!("no web view for {tab_id}")))?
+                .zoom(factor)
+                .map_err(|why| WebviewError::Failed(format!("zoom {tab_id}: {why}")))
+        }
+
         fn set_visible(&mut self, tab_id: &str, visible: bool) {
             if let Some(view) = self.views.get(tab_id) {
                 if let Err(why) = view.set_visible(visible) {
@@ -1307,6 +1384,18 @@ mod platform {
             ))
         }
 
+        fn reload(&mut self, _: &str) -> Result<(), WebviewError> {
+            Err(WebviewError::Unsupported(
+                "a native child web view is implemented on Windows (WebView2) only",
+            ))
+        }
+
+        fn set_zoom(&mut self, _: &str, _: f64) -> Result<(), WebviewError> {
+            Err(WebviewError::Unsupported(
+                "a native child web view is implemented on Windows (WebView2) only",
+            ))
+        }
+
         fn set_scale(&mut self, _: f32) {}
 
         fn set_visible(&mut self, _: &str, _: bool) {}
@@ -1362,6 +1451,13 @@ pub mod fake {
         Eval {
             tab: String,
             script: String,
+        },
+        Reload {
+            tab: String,
+        },
+        Zoom {
+            tab: String,
+            factor: f64,
         },
         Scale {
             scale: f32,
@@ -1565,6 +1661,27 @@ pub mod fake {
             self.log.events.borrow_mut().push(Event::Eval {
                 tab: tab_id.to_owned(),
                 script: script.to_owned(),
+            });
+            Ok(())
+        }
+
+        fn reload(&mut self, tab_id: &str) -> Result<(), WebviewError> {
+            if !self.attached.contains(tab_id) {
+                return Err(WebviewError::Failed(format!("no web view for {tab_id}")));
+            }
+            self.log.events.borrow_mut().push(Event::Reload {
+                tab: tab_id.to_owned(),
+            });
+            Ok(())
+        }
+
+        fn set_zoom(&mut self, tab_id: &str, factor: f64) -> Result<(), WebviewError> {
+            if !self.attached.contains(tab_id) {
+                return Err(WebviewError::Failed(format!("no web view for {tab_id}")));
+            }
+            self.log.events.borrow_mut().push(Event::Zoom {
+                tab: tab_id.to_owned(),
+                factor,
             });
             Ok(())
         }

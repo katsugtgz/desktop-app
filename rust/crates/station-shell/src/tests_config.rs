@@ -127,8 +127,8 @@ fn an_installed_preset_app_gets_a_configure_button_and_an_editor() {
     press(&mut rt, &format!("settings-configure-{gmail}"));
     draw(&mut rt);
     assert!(
-        shows(&rt, "Sign-in is not available in the native shell yet."),
-        "a google-account app must say sign-in is unavailable, not show a stub field"
+        shows(&rt, "Sign-in requires GOOGLE_CLIENT_ID in the environment."),
+        "a google-account app must explain that GOOGLE_CLIENT_ID is required when unconfigured, not show a stub field"
     );
     // No text field is offered for an identity the shell cannot obtain.
     let fields: Vec<_> = rt

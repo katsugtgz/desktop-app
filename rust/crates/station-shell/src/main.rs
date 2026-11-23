@@ -84,6 +84,9 @@ mod tests_downloads;
 #[cfg(test)]
 mod tests_site_scripts;
 
+#[cfg(test)]
+mod tests_shortcuts;
+
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never

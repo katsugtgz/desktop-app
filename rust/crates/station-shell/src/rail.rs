@@ -51,6 +51,7 @@ pub fn rail(state: &ShellState, p: Paint) -> El {
 /// (D11: Rune gives a rail row no keyboard focus, so the affordance cannot live on the rail).
 fn tab_row(tab: &AppTab, state: &ShellState, active: bool, p: Paint) -> El {
     let id = tab.id.clone();
+    let menu_id = tab.id.clone();
     let mut row = el()
         .key(tab.key())
         .role("tab")
@@ -81,6 +82,11 @@ fn tab_row(tab: &AppTab, state: &ShellState, active: bool, p: Paint) -> El {
             )
             .key(format!("tab-icon-{}", tab.id)),
         );
+    if tab.kind == crate::state::TabKind::Web {
+        row = row.on_secondary_press(move |s: &mut ShellState, _, _| {
+            s.toggle_tab_menu(&menu_id);
+        });
+    }
     if let Some(badge) = &tab.badge {
         row = row.child(badge_view(&tab.id, badge, p));
     }
