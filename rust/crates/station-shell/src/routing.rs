@@ -154,6 +154,11 @@ pub fn remember_waker(waker: rune::Waker) {
     WAKER.with(|slot| *slot.borrow_mut() = Some(waker));
 }
 
+/// Clones the remembered Rune wake handle, if the shell has started.
+pub fn current_waker() -> Option<rune::Waker> {
+    WAKER.with(|slot| slot.borrow().clone())
+}
+
 /// The decision for `url`, from the request's origin tab: which tab shows it, or the OS browser.
 ///
 /// The mapping from [`url_router`]'s actions to the shell's one-tab-per-app model:

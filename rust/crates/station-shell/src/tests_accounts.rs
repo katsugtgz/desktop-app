@@ -184,7 +184,9 @@ fn settings_lists_the_stored_accounts() {
 
 #[test]
 fn the_empty_accounts_card_is_honest_about_sign_in() {
-    let mut rt = runtime(launched(&session_path("empty")));
+    let mut state = launched(&session_path("empty"));
+    state.set_oauth_config_for_tests(None);
+    let mut rt = runtime(state);
     draw(&mut rt);
     press(&mut rt, "rail-settings");
     draw(&mut rt);
@@ -192,8 +194,8 @@ fn the_empty_accounts_card_is_honest_about_sign_in() {
     assert!(rt.find("settings-accounts").is_some(), "no Accounts card");
     assert!(shows(&rt, "No accounts yet."), "no empty-state sentence");
     assert!(
-        shows(&rt, "Sign-in is not available in the native shell yet."),
-        "the empty card does not say sign-in is absent"
+        shows(&rt, "Sign-in requires GOOGLE_CLIENT_ID in the environment."),
+        "the empty card does not say sign-in is unconfigured"
     );
     assert!(
         rt.find("settings-accounts-signin").is_some(),
@@ -203,7 +205,7 @@ fn the_empty_accounts_card_is_honest_about_sign_in() {
         keys_with_prefix(&rt, "settings-account-").is_empty(),
         "an empty store drew an account row"
     );
-    // No sign-in control: nothing in this slice can create an identity.
+    // No sign-in control when GOOGLE_CLIENT_ID is unset.
     let buttons: Vec<String> = rt
         .elements()
         .into_iter()
@@ -212,7 +214,7 @@ fn the_empty_accounts_card_is_honest_about_sign_in() {
         .collect();
     assert!(
         !buttons.iter().any(|label| label.contains("Sign in")),
-        "a sign-in button exists before sign-in: {buttons:?}"
+        "a sign-in button exists when OAuth is unconfigured: {buttons:?}"
     );
 }
 
@@ -321,7 +323,9 @@ fn the_chooser_writes_the_identity_and_the_tab_follows_the_existing_path() {
 
 #[test]
 fn a_google_account_app_without_identities_keeps_the_honest_note() {
-    let mut rt = runtime(launched(&session_path("no-identity")));
+    let mut state = launched(&session_path("no-identity"));
+    state.set_oauth_config_for_tests(None);
+    let mut rt = runtime(state);
     draw(&mut rt);
     let gmail = install_gmail(&mut rt);
 
@@ -331,15 +335,18 @@ fn a_google_account_app_without_identities_keeps_the_honest_note() {
     draw(&mut rt);
 
     assert!(
-        shows(&rt, "Sign-in is not available in the native shell yet."),
-        "a google-account app must say sign-in is unavailable"
+        shows(&rt, "Sign-in requires GOOGLE_CLIENT_ID in the environment."),
+        "a google-account app must say sign-in requires GOOGLE_CLIENT_ID when unconfigured"
     );
     assert!(
         rt.find("config-identity-empty-hint").is_some(),
         "the empty editor gives no next step"
     );
     assert!(
-        shows(&rt, "Add an account once sign-in lands."),
+        shows(
+            &rt,
+            "Set GOOGLE_CLIENT_ID and sign in from Settings -> Accounts."
+        ),
         "the hint does not say how an account would appear"
     );
     assert!(
@@ -377,4 +384,123 @@ fn accounts_ride_the_session_document_through_an_unrelated_save() {
     assert_eq!(ada.profile_data.display_name, "Ada Lovelace");
     assert_eq!(ada.profile_data.email, "ada@example.com");
     assert_eq!(ada.provider, "google");
+}
+
+// ---- Slice 25: OAuth Option B end-to-end + account removal ----------------------------
+
+struct FakeExchanger {
+    id_token: String,
+}
+
+impl crate::oauth::TokenExchanger for FakeExchanger {
+    fn exchange(
+        &self,
+        _config: &crate::oauth::OAuthConfig,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<String, crate::oauth::OAuthError> {
+        assert_eq!(code, "browser-code-77");
+        assert!(verifier.len() >= 43);
+        assert!(redirect_uri.starts_with("http://127.0.0.1:"));
+        Ok(self.id_token.clone())
+    }
+}
+
+#[test]
+fn configured_oauth_flow_persists_zero_token_identity_and_remove_cleans_up() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let _serial = crate::test_support::lock();
+    let path = session_path("oauth-e2e");
+    let mut state = launched(&path);
+    state.set_oauth_config_for_tests(Some(crate::oauth::OAuthConfig {
+        client_id: "test-client.apps.googleusercontent.com".to_owned(),
+        client_secret: None,
+    }));
+
+    let mut rt = runtime(state);
+    draw(&mut rt);
+    press(&mut rt, "rail-settings");
+    draw(&mut rt);
+    assert!(
+        rt.find("settings-google-signin").is_some(),
+        "Sign in with Google button should appear when GOOGLE_CLIENT_ID is configured"
+    );
+
+    // Build fake ID token JWT
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "sub": "998877",
+            "email": "linus@example.com",
+            "name": "Linus Torvalds",
+            "given_name": "Linus",
+            "family_name": "Torvalds",
+            "picture": "https://cdn.example/linus.png"
+        })
+        .to_string(),
+    );
+    let jwt = format!("{header}.{payload}.sig");
+
+    let mut opened_url = String::new();
+    let auth_url = rt
+        .state
+        .start_google_sign_in_with(
+            std::sync::Arc::new(FakeExchanger { id_token: jwt }),
+            |url| opened_url = url.to_owned(),
+        )
+        .expect("start oauth");
+    assert_eq!(auth_url, opened_url);
+
+    // Extract redirect_uri and state from the opened browser URL, then hit the real loopback server!
+    let parsed = url::Url::parse(&auth_url).expect("parse auth url");
+    let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+    let redirect = url::Url::parse(params.get("redirect_uri").unwrap()).unwrap();
+    let port = redirect.port().unwrap();
+    let state_param = params.get("state").unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback");
+    let req = format!(
+        "GET /callback?code=browser-code-77&state={state_param} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+
+    // Poll until background thread finishes token exchange and writes completed result
+    let mut landed = false;
+    for step in 0..40 {
+        if webview::poll_at(&mut rt.state, step as f64) {
+            landed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(landed, "OAuth worker result did not land in poll_at");
+    assert!(!rt.state.oauth_in_progress());
+    assert!(rt.state.identities().contains_key("google-998877"));
+
+    // Verify zero tokens written to session JSON on disk!
+    let raw_json = std::fs::read_to_string(&path).expect("read session");
+    assert!(!raw_json.contains("accessToken"));
+    assert!(!raw_json.contains("refreshToken"));
+    assert!(!raw_json.contains("id_token"));
+    assert!(raw_json.contains("linus@example.com"));
+
+    // Settings renders the account and Remove deletes it cleanly.
+    rt.invalidate();
+    draw(&mut rt);
+    assert!(rt.find("settings-account-google-998877").is_some());
+    assert!(rt.find("settings-account-remove-google-998877").is_some());
+    press(&mut rt, "settings-account-remove-google-998877");
+    draw(&mut rt);
+    assert!(rt.state.identities().is_empty());
+    assert!(rt.find("settings-account-google-998877").is_none());
+
+    let _ = std::fs::remove_file(&path);
 }

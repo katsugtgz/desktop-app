@@ -471,6 +471,7 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     changed |= crate::notifications::deliver_to(state);
     changed |= crate::notifications::expire_snooze(state, clock);
     sync_snooze(state.effective_snooze_duration_ms());
+    changed |= state.poll_oauth();
     state.prefetch_icons();
     changed |= state.drain_icons();
     changed

@@ -4277,8 +4277,10 @@ version = "0.1.0"
 dependencies = [
  "about-window",
  "appstore-service",
+ "base64 0.22.1",
  "dirs",
  "embed-resource",
+ "getrandom 0.2.17",
  "image",
  "manifest-registry",
  "notification-center",
@@ -4289,6 +4291,7 @@ dependencies = [
  "sha2 0.10.9",
  "tab-model",
  "ureq",
+ "url",
  "url-router",
  "windows-sys 0.59.0",
  "wry",

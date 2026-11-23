@@ -17,8 +17,12 @@ url-router = { path = "../url-router" }
 # Icons: the fetcher runs on one worker thread; `rustls` + webpki roots keeps TLS off the OS
 # store and adds no `-sys` build (the default `tls` feature is what this crate enables anyway).
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
-# The disk cache names each icon by the SHA-256 of its URL.
+# The disk cache names each icon by the SHA-256 of its URL (also used for OAuth PKCE S256).
 sha2 = "0.10"
+# OAuth Option B (PKCE verifier/state randomness, base64url, and query-safe URL parsing).
+base64 = "0.22"
+getrandom = "0.2"
+url = "2"
 # Icon decode: the same crate and version rune decodes with (`ImageCache::load` takes bytes, but
 # the shell needs the width/height cap *before* mips are built, so it decodes itself).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }

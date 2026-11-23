@@ -20,6 +20,7 @@ mod ico;
 mod icons;
 mod instance;
 mod notifications;
+mod oauth;
 mod placeholder;
 #[cfg(target_os = "windows")]
 mod platform_icon;

@@ -310,6 +310,10 @@ pub struct ShellState {
     config_draft: Option<ConfigDraft>,
     /// Metadata and update-check state for the About Station surface (`about-window` crate).
     about_state: about_window::AboutWindowState,
+    /// Google OAuth Option B client config (from `GOOGLE_CLIENT_ID` / optional secret).
+    oauth_config: Option<crate::oauth::OAuthConfig>,
+    /// Transient sign-in status or error message shown in Settings (never persisted).
+    oauth_status: Option<String>,
 }
 
 /// The settings editor's draft for one installed application.
@@ -325,8 +329,7 @@ pub struct ConfigDraft {
 /// The one configuration field a manifest's presets consume — what the editor shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigField {
-    /// `google-account` presets: an identity id string. The shell cannot obtain one (no OAuth),
-    /// so the editor says so instead of pretending.
+    /// `google-account` presets: an identity id string, linked to a stored OAuth identity.
     Identity,
     /// `on-premise` presets: the instance's full URL.
     CustomUrl,
@@ -396,6 +399,8 @@ impl ShellState {
             icons: crate::icons::IconStore::new(),
             config_draft: None,
             about_state: about_window::AboutWindowState::default(),
+            oauth_config: crate::oauth::OAuthConfig::from_env(),
+            oauth_status: None,
         };
         state.rebuild_tabs();
         state
@@ -747,11 +752,154 @@ impl ShellState {
         true
     }
 
-    /// The accounts the session stores, keyed by `identityId` (slice 17). Nothing creates one
-    /// yet — sign-in lands in a later slice — so Settings shows its empty state and the Configure
-    /// chooser offers only what is already here.
+    /// The accounts the session stores, keyed by `identityId` (slices 17 / 25).
     pub fn identities(&self) -> &BTreeMap<String, Identity> {
         &self.identities
+    }
+
+    /// Adds or replaces a stored identity (zero tokens) and persists the session immediately.
+    /// Returns false if the session identity cap or field bounds would be exceeded.
+    pub fn add_identity(&mut self, identity: Identity) -> bool {
+        if identity.identity_id.is_empty()
+            || (!self.identities.contains_key(&identity.identity_id)
+                && self.identities.len() >= session_store::MAX_IDENTITIES)
+        {
+            return false;
+        }
+        let fields = [
+            identity.identity_id.as_str(),
+            identity.provider.as_str(),
+            identity.user_id.as_str(),
+            identity.profile_data.display_name.as_str(),
+            identity.profile_data.first_name.as_str(),
+            identity.profile_data.last_name.as_str(),
+            identity.profile_data.email.as_str(),
+            identity.profile_data.image_url.as_str(),
+        ];
+        if fields
+            .iter()
+            .any(|v| v.chars().count() > session_store::MAX_IDENTITY_FIELD_CHARS)
+        {
+            return false;
+        }
+        self.identities
+            .insert(identity.identity_id.clone(), identity);
+        self.persist();
+        true
+    }
+
+    /// Removes a stored account by `identity_id`, clears any app config referencing it, and
+    /// persists the session immediately.
+    pub fn remove_identity(&mut self, identity_id: &str) -> bool {
+        if self.identities.remove(identity_id).is_none() {
+            return false;
+        }
+        let affected: Vec<String> = self
+            .store
+            .installed_applications()
+            .values()
+            .filter(|app| app.config_data.identity_id.as_deref() == Some(identity_id))
+            .map(|app| app.application_id.clone())
+            .collect();
+        for app_id in affected {
+            let _ = self.store.clear_config_data(&app_id);
+        }
+        self.rebuild_tabs();
+        self.persist();
+        true
+    }
+
+    /// True when `GOOGLE_CLIENT_ID` is configured for native Google sign-in.
+    pub fn oauth_configured(&self) -> bool {
+        self.oauth_config.is_some()
+    }
+
+    /// Overrides the OAuth configuration in tests without mutating process env vars.
+    #[cfg(test)]
+    pub fn set_oauth_config_for_tests(&mut self, config: Option<crate::oauth::OAuthConfig>) {
+        self.oauth_config = config;
+    }
+
+    /// True while a Google sign-in flow is awaiting the browser callback or token exchange.
+    pub fn oauth_in_progress(&self) -> bool {
+        crate::oauth::is_in_progress()
+    }
+
+    /// Transient sign-in status or error text shown in Settings.
+    pub fn oauth_status(&self) -> Option<&str> {
+        self.oauth_status.as_deref()
+    }
+
+    /// Starts Google sign-in in the system browser using PKCE + loopback HTTP callback.
+    pub fn start_google_sign_in(&mut self) {
+        let _ = self.start_google_sign_in_with(
+            std::sync::Arc::new(crate::oauth::GoogleTokenExchanger),
+            crate::routing::open_external,
+        );
+    }
+
+    /// Testable seam for starting Google sign-in with an injected token exchanger & browser opener.
+    pub fn start_google_sign_in_with(
+        &mut self,
+        exchanger: std::sync::Arc<dyn crate::oauth::TokenExchanger>,
+        open_browser: impl FnOnce(&str),
+    ) -> Result<String, crate::oauth::OAuthError> {
+        let Some(config) = self.oauth_config.clone() else {
+            let err = crate::oauth::OAuthError::NotConfigured;
+            self.oauth_status = Some(err.to_string());
+            return Err(err);
+        };
+        match crate::oauth::start_google_sign_in(
+            config,
+            exchanger,
+            open_browser,
+            crate::routing::current_waker(),
+        ) {
+            Ok(url) => {
+                self.oauth_status =
+                    Some("Waiting for Google sign-in in your browser...".to_owned());
+                Ok(url)
+            }
+            Err(err) => {
+                self.oauth_status = Some(err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    /// Cancels an in-progress Google sign-in flow.
+    pub fn cancel_google_sign_in(&mut self) {
+        if crate::oauth::cancel_sign_in() {
+            self.oauth_status = Some("Sign-in cancelled.".to_owned());
+        }
+    }
+
+    /// Drains a completed background OAuth sign-in result into the session (called by `poll_at`).
+    pub fn poll_oauth(&mut self) -> bool {
+        let Some(outcome) = crate::oauth::take_completed() else {
+            return false;
+        };
+        match outcome {
+            Ok(identity) => {
+                let label = if !identity.profile_data.email.is_empty() {
+                    identity.profile_data.email.clone()
+                } else {
+                    identity.identity_id.clone()
+                };
+                if self.add_identity(identity) {
+                    self.oauth_status = Some(format!("Signed in as {label}."));
+                } else {
+                    self.oauth_status = Some(
+                        "Account limit reached; remove an existing account before signing in."
+                            .to_owned(),
+                    );
+                }
+            }
+            Err(err) => {
+                self.oauth_status = Some(err.to_string());
+            }
+        }
+        true
     }
 
     /// Removes an installed application's configuration: the tab reverts to the manifest's own

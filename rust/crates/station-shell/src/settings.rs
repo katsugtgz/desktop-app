@@ -213,13 +213,14 @@ fn start_at_login_row(state: &ShellState, p: Paint, supported: bool) -> Option<E
     )
 }
 
-/// The stored accounts (slice 17): display name and email per identity, or the honest empty
-/// state — this slice stores no identities of its own (sign-in lands later), so a fresh
-/// document says so instead of offering a control that could do nothing.
+/// The stored accounts (slices 17 / 25): display name, email, and Remove button per identity,
+/// plus native Google OAuth sign-in (Option B: system browser + PKCE + loopback) when
+/// `GOOGLE_CLIENT_ID` is configured, or an honest unconfigured note otherwise.
 fn accounts(state: &ShellState, p: Paint) -> El {
     let mut rows: Vec<El> = Vec::new();
     for identity in state.identities().values() {
-        let id = &identity.identity_id;
+        let id = identity.identity_id.clone();
+        let remove_id = id.clone();
         rows.push(
             row()
                 .key(format!("settings-account-{id}"))
@@ -229,18 +230,46 @@ fn accounts(state: &ShellState, p: Paint) -> El {
                 .center_y()
                 .justify_between()
                 .child(
-                    text(identity_name(identity))
-                        .key(format!("settings-account-name-{id}"))
-                        .font(type_::BODY)
-                        .color(p.t.text)
-                        .truncate(),
+                    row()
+                        .grow(1.0)
+                        .gap(space::S3)
+                        .center_y()
+                        .child(
+                            text(identity_name(identity))
+                                .key(format!("settings-account-name-{id}"))
+                                .font(type_::BODY)
+                                .color(p.t.text)
+                                .truncate(),
+                        )
+                        .child(
+                            text(identity.profile_data.email.clone())
+                                .key(format!("settings-account-email-{id}"))
+                                .font(type_::MONO_CAPTION)
+                                .color(p.t.text_secondary)
+                                .truncate(),
+                        ),
                 )
                 .child(
-                    text(identity.profile_data.email.clone())
-                        .key(format!("settings-account-email-{id}"))
-                        .font(type_::MONO_CAPTION)
-                        .color(p.t.text_secondary)
-                        .truncate(),
+                    el().key(format!("settings-account-remove-{id}"))
+                        .role("button")
+                        .label(format!("Remove {}", identity_name(identity)))
+                        .focusable(true)
+                        .h(24.0)
+                        .px(space::S2)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(p.t.control_track)
+                        .hover(p.t.hover)
+                        .press(p.t.press)
+                        .on_press(move |state: &mut ShellState| {
+                            state.remove_identity(&remove_id);
+                        })
+                        .child(
+                            text("Remove")
+                                .font(type_::LABEL)
+                                .color(p.t.text)
+                                .a11y_hidden(),
+                        ),
                 ),
         );
     }
@@ -253,8 +282,88 @@ fn accounts(state: &ShellState, p: Paint) -> El {
                 .px(space::S3)
                 .py(space::S2),
         );
+    }
+    if state.oauth_in_progress() {
         rows.push(
-            text("Sign-in is not available in the native shell yet.")
+            row()
+                .key("settings-oauth-pending")
+                .h(36.0)
+                .px(space::S3)
+                .gap(space::S3)
+                .center_y()
+                .justify_between()
+                .child(
+                    text("Waiting for Google sign-in in your browser...")
+                        .key("settings-oauth-status")
+                        .font(type_::LABEL)
+                        .color(p.t.text_secondary)
+                        .truncate(),
+                )
+                .child(
+                    el().key("settings-oauth-cancel")
+                        .role("button")
+                        .label("Cancel sign-in")
+                        .focusable(true)
+                        .h(26.0)
+                        .px(space::S2)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(p.t.control_track)
+                        .hover(p.t.hover)
+                        .press(p.t.press)
+                        .on_press(|state: &mut ShellState| state.cancel_google_sign_in())
+                        .child(
+                            text("Cancel")
+                                .font(type_::LABEL)
+                                .color(p.t.text)
+                                .a11y_hidden(),
+                        ),
+                ),
+        );
+    } else if state.oauth_configured() {
+        rows.push(
+            row()
+                .key("settings-accounts-signin")
+                .h(40.0)
+                .px(space::S3)
+                .gap(space::S3)
+                .center_y()
+                .justify_between()
+                .child(
+                    text(
+                        state
+                            .oauth_status()
+                            .unwrap_or("Sign in with Google via your system browser."),
+                    )
+                    .key("settings-oauth-status")
+                    .font(type_::LABEL)
+                    .color(p.t.text_secondary)
+                    .truncate(),
+                )
+                .child(
+                    el().key("settings-google-signin")
+                        .role("button")
+                        .label("Sign in with Google")
+                        .focusable(true)
+                        .h(28.0)
+                        .px(space::S3)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(p.t.control_track)
+                        .hover(p.t.hover)
+                        .press(p.t.press)
+                        .on_press(|state: &mut ShellState| state.start_google_sign_in())
+                        .child(
+                            text("Sign in with Google")
+                                .font(type_::LABEL)
+                                .color(p.t.text)
+                                .a11y_hidden(),
+                        ),
+                ),
+        );
+    } else if state.identities().is_empty() {
+        rows.push(
+            text("Sign-in requires GOOGLE_CLIENT_ID in the environment.")
                 .key("settings-accounts-signin")
                 .font(type_::LABEL)
                 .color(p.t.text_secondary)
@@ -543,8 +652,13 @@ pub fn config_editor(state: &ShellState, p: Paint) -> El {
             .center_y()
             .child(
                 text(match field {
+                    crate::state::ConfigField::Identity
+                        if state.identities().is_empty() && state.oauth_configured() =>
+                    {
+                        "Sign in with Google to choose an account."
+                    }
                     crate::state::ConfigField::Identity if state.identities().is_empty() => {
-                        "Sign-in is not available in the native shell yet."
+                        "Sign-in requires GOOGLE_CLIENT_ID in the environment."
                     }
                     crate::state::ConfigField::Identity => "Choose an account",
                     _ => field_label,
@@ -583,14 +697,44 @@ pub fn config_editor(state: &ShellState, p: Paint) -> El {
     }
     if field == crate::state::ConfigField::Identity {
         if state.identities().is_empty() {
-            // Honest empty state: no account exists to choose, and this slice cannot create one.
-            card_rows.push(
-                text("Add an account once sign-in lands.")
-                    .key("config-identity-empty-hint")
-                    .font(type_::LABEL)
-                    .color(p.t.text_secondary)
-                    .px(space::S3),
-            );
+            if state.oauth_configured() {
+                card_rows.push(
+                    row()
+                        .key("config-identity-empty-hint")
+                        .px(space::S3)
+                        .py(space::S2)
+                        .gap(space::S3)
+                        .center_y()
+                        .child(
+                            el().key("config-google-signin")
+                                .role("button")
+                                .label("Sign in with Google")
+                                .focusable(true)
+                                .h(28.0)
+                                .px(space::S3)
+                                .center()
+                                .radius(radius::SM)
+                                .fill(p.t.control_track)
+                                .hover(p.t.hover)
+                                .press(p.t.press)
+                                .on_press(|state: &mut ShellState| state.start_google_sign_in())
+                                .child(
+                                    text("Sign in with Google")
+                                        .font(type_::LABEL)
+                                        .color(p.t.text)
+                                        .a11y_hidden(),
+                                ),
+                        ),
+                );
+            } else {
+                card_rows.push(
+                    text("Set GOOGLE_CLIENT_ID and sign in from Settings -> Accounts.")
+                        .key("config-identity-empty-hint")
+                        .font(type_::LABEL)
+                        .color(p.t.text_secondary)
+                        .px(space::S3),
+                );
+            }
         } else {
             card_rows.push(identity_chooser(state, &application_id, p));
         }
