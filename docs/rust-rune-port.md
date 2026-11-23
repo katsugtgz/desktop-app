@@ -992,6 +992,63 @@ bullets that follow.
 - Windows build requires the vendored patches (D2): the first `cargo fetch` without them failed on
   `parley_engine`'s missing `line-dictionaries` feature.
 
+## Slices 23–30 & Baseline Fixes (2026-11-23, `feat/full-rust-port`)
+
+- **Baseline fixes (`24e07c5`)**: Fixed a JS `SyntaxError` in `notifications/bridge.rs` (`INIT_SCRIPT`),
+  caught by running the real script in headless Chrome via `agent-browser`; fixed `downloads.rs`
+  compound-extension Windows reserved device name check (`NUL.tar.gz`); moved remaining icon asset
+  reads in `platform_icon.rs` and `tests_tray.rs` to `rust/assets/station.ico` (completing P0
+  decoupling — zero non-comment `packages/` references in `rust/crates/`); enabled `napi`
+  `"dyn-symbols"` in `station-bridge/Cargo.toml` so `cargo test --workspace` and
+  `cargo clippy --workspace --all-targets -- -D warnings` pass across all 13 crates with zero
+  exclusions (while `node scripts/rust-bridge-smoke.js` continues passing 17/17 checks).
+- **Slice 23 (`053c4b1`) — Per-site injected JS & snooze fan-out**: Added `site_scripts.rs` (all 7
+  static IIFE scripts covering the 14 Electron `JAVASCRIPT_INJECTIONS` legacy service IDs), added
+  `addSnoozeDurationInMsChangeListener` / `removeSnoozeDurationInMsChangeListener` +
+  `__stationSnoozeUpdate` hook, and wired `webview::sync_snooze` fan-out on poll & attach.
+- **Slice 24 (`417e39e`) — About Station & fatal error dialogs**: Added `about.rs` (`Surface::About`
+  over `about-window`, Settings → General entry, v1 GitHub Releases check-for-updates link,
+  `--scene about`) and `dialogs.rs` (Win32 `MessageBoxW` / stderr fallback around `app.run()`).
+- **Slice 25 (`0d1b042`) — Google OAuth Option B**: Added `oauth.rs` (RFC 7636 PKCE `S256`,
+  single-shot loopback HTTP server on `127.0.0.1:0` with constant-length state check, strict CSP
+  static HTML, `GoogleTokenExchanger` over `ureq`, zero tokens persisted) and wired Settings
+  Accounts sign-in / cancel / remove.
+- **Slice 26 (`48404a8`) — Tab actions & keyboard shortcuts**: Added top-bar web controls
+  (Back/Fwd/Reload/Browser/`...`), Rune `tab_actions_bar` (40 pt strip shrinking `content` cleanly),
+  rail right-click trigger, and global shortcuts (`Escape`, `Cmd/Ctrl+,`, `Cmd/Ctrl+1..9`,
+  `Cmd/Ctrl+R`/`F5`, `Cmd/Ctrl+[`/`]`, `Cmd/Ctrl+0`/`=`/`+`/`-`).
+- **Slice 27 (`f7b54f6`) — In-tab search (`Ctrl+F`)**: Added `find.rs` (40 pt Rune bar above
+  `content`), JSON-escaped `window.__stationFind` / `window.__stationFindClear` literal DOM search
+  (no `RegExp` on user input), and bounded `PageMessage::Find` (`kind: "find"`) IPC reporting.
+- **Slice 28 (`130c1b9`) — Bang Quick Switcher, Favorites & Frecency**: Added `FavoriteEntry` to
+  `session-store` v1 (capped/validated, refuse-never-truncate), wired `activity::frecency` tab
+  scoring, added `quick_switch.rs` (`Surface::QuickSwitch`, `Ctrl/Cmd+K`/`T`, `--scene quick-switch`),
+  top-bar/tab-actions favorite pin toggle, and App Store quick-install results.
+- **Slice 29 (`edf7b81`) — OS notifications & `Snooze::SyncWithOs`**: Added `notifications/os.rs`
+  (Win32 `Shell_NotifyIconW` `NIF_INFO` balloon with surrogate-safe UTF-16 copy, 12/min rolling rate
+  cap, snooze suppression, clean shutdown) and `SHQueryUserNotificationState` OS DND polling every
+  5 s under `Snooze::SyncWithOs`, driving `effective_snooze_duration_ms()` and page fan-out.
+- **Slice 30 (`ac2c089`) — Crash reporting & permission handler**: Added `crash.rs` (panic hook
+  writing bounded 8 KiB secret-free reports to `<config>/station/crashes/`, pruned at 20 files) and
+  `permissions.rs` wired to `wry::WebViewBuilder::with_permission_handler` (denying WebView2
+  `Notifications` and silent/privileged APIs while prompting interactive media/geo/clipboard/autoplay).
+- **Verified on Linux + cross-target + real Chrome (2026-11-23)**:
+  - `cargo fmt --all --check`: clean.
+  - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings across all 13 crates.
+  - `cargo check -p station-shell --target x86_64-pc-windows-gnu`: 0 warnings in `station-shell`
+    (full Windows typecheck of `wry 0.57.2`, `webview2-com`, `windows-sys 0.59.0`).
+  - `cargo test --workspace`: **587 passed, 0 failed, 1 ignored** (`station-shell` 263 + 1 live
+    Chrome OAuth test passed separately = **588 passing** across all 13 crates).
+  - `node scripts/rust-bridge-smoke.js`: **17/17 PASS**.
+  - Headless Google Chrome (`agent-browser`): core `INIT_SCRIPT`, snooze listeners, in-tab find
+    (`__stationFind` / `__stationFindClear` incl. `(a+b)` literal matching), all 7 per-site scripts,
+    and OAuth loopback callback + XSS/state-mismatch rejection **ALL PASSED**.
+  - Rune `--snap` (lavapipe software Vulkan): all 5 surfaces (`store`, `settings`, `notifications`,
+    `about`, `quick-switch`) rendered and visually inspected.
+  - **Still requires a real Windows host**: live WebView2 visual composition, Win32 `MessageBoxW` /
+    `Shell_NotifyIconW` balloon / `SHQueryUserNotificationState` live OS behavior, live Google
+    account OAuth sign-in, and clean-VM NSIS installer sign-off prior to P6–P8 Electron deletion.
+
 ## Unverified
 
 - **Z-order is only partly observed.** A `PrintWindow` capture of the running window showed the rail

@@ -6,20 +6,19 @@ present and unaffected; this workspace is where the Rust port lives, one crate p
 ```bash
 cd rust
 cargo run -p station-shell          # the native shell (Windows; see requirements)
-cargo test --workspace              # every crate's tests (539 passing)
-cargo clippy --workspace --all-targets --exclude station-bridge -- -D warnings   # see note
+cargo test --workspace              # every crate's tests (587 passing + 1 ignored live-Chrome OAuth test)
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-`station-bridge` (the Electron napi crate) fails `-D warnings` on its own *lib test* target: the
-`#[napi]` watcher/emit functions are only reachable through generated bindings, so the test build
-sees them as dead code. Exclude it (as above) or drop `-D warnings` for a workspace-wide run; the
-crate is otherwise untouched by the shell work.
+All 13 crates (including `station-bridge`) pass `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` with zero exclusions.
 
 ## Requirements
 
 - **Windows 10/11, MSVC toolchain** (`x86_64-pc-windows-msvc`, rustup's default). Rune needs no
-  extra system libraries beyond the VS C++ build tools rustup asks for.
+  extra system libraries beyond the VS C++ build tools rustup asks for. (Cross-typechecking all
+  `#[cfg(target_os = "windows")]` code from Linux also works via `cargo check -p station-shell
+  --target x86_64-pc-windows-gnu` with `mingw-w64`.)
 - **WebView2 Evergreen runtime** — what an installed Edge on Windows 10/11 already provides
   (`C:\Program Files (x86)\Microsoft\EdgeWebView\Application`; version 157.0.4341.46 was used for
   verification). The shell's app pages are WebView2 child windows; without the runtime a page
@@ -33,6 +32,8 @@ cargo run -p station-shell                          # a window at the session's 
 cargo run -p station-shell -- --snap shot.png       # one headless frame, no window
 cargo run -p station-shell -- --snap s.png --scene settings        # the Settings screen
 cargo run -p station-shell -- --snap n.png --scene notifications   # the notification panel
+cargo run -p station-shell -- --snap a.png --scene about           # About Station screen
+cargo run -p station-shell -- --snap q.png --scene quick-switch    # Bang Quick Switcher palette
 ```
 
 `--snap` and the other headless flags come from Rune's `tooling` feature, which
@@ -113,118 +114,74 @@ path: it logs `station-shell: no web view for <app>: …` and keeps running.
 
 ## Feature gaps
 
-What works and what does not, kept honest:
+What works and what does not, kept honest (updated through Slice 30, 2026-11-23):
 
-- **App pages**: installed apps open in a WebView2 child at their manifest start URL. Multi-instance
-  preset apps (Gmail, Slack) open signed-out (Gmail's account picker); the
-  `station://multi-instance-configurator` OAuth flow is not drawn yet.
+- **App pages & per-site scripts**: installed apps open in a WebView2 child at their manifest start
+  URL. `site_scripts.rs` (slice 23) injects the 7 static IIFE per-site scripts covering all 14
+  Electron `JAVASCRIPT_INJECTIONS` legacy service IDs (Gmail, Slack, WhatsApp, Messenger,
+  Outlook/Office 365, Google Drive/Calendar/Cloud/Keep/Meet, Asana) alongside `INIT_SCRIPT`.
 - **Page title & badge**: a hosted page's `document.title` becomes the top bar and rail label (the
-  manifest name is the fallback, and clearing restores it), and its
-  `meta[name=browserx-badge]` meta draws a rail badge — a count (`999+` past the cap) or a dot for
-  a text badge. Both are in memory only, never in the session document. Not covered yet: the
-  per-site scripts that *write* the badge meta for Gmail/Slack/Outlook/…, favicons, and per-tab
-  history.
-- **Page environment**: a new page is created with the Electron session's user agent
+  manifest name is the fallback, and clearing restores it), and its `meta[name=browserx-badge]` meta
+  draws a rail badge — a count (`999+` past the cap) or a dot for a text badge. Both are in memory
+  only, never in the session document. Not covered yet: favicons and per-tab history lists.
+- **Page environment & permissions**: a new page is created with the Electron session's user agent
   (`packages/app/src/session.ts:67` — the Mac/Chrome 150 string), or with the manifest's
   `bx_override_user_agent` for that app; each app gets its own WebView2 user-data folder under
   `<session dir>/webview/app-<id>` (Electron's `persist:<applicationId>`), while apps with
-  `bx_use_default_session` share `webview/default`. Both are fixed when the web view is built; a
-  page cannot change either. Not reproduced: the TS per-request header rules — the
-  `accounts.google.com` UA override, localhost Referer stripping and CSP-header deletion — because
-  wry exposes no header interception (`with_user_agent` is per-webview, and
-  `with_url_and_headers` only sets the first load's headers). **Downloads** are allowed: the
-  page-suggested name is sanitized and placed under the OS Downloads folder (never a page path,
-  no overwrites, at most 4 concurrent — `downloads.rs`, slice 22), and started / complete / failed
-  are logged (at most 32 lines per run, URL and path capped at 256 chars). There is no download
-  UI or counter.
-- **New windows**: a page's `window.open`/`target=_blank` never opens an OS window; `url-router`
-  routes it to an app's tab, or the system browser. Install-from-link is not wired.
-- **Deep links & single instance**: a `station://` URL the process is launched with is read
-  once at startup (`deep_link::open` in `AppSpec::setup`; the OS registration itself is a
-  packaging step, `docs/rust-packaging-plan.md` §7). `station://appstore` and
-  `station://appstore/` open with the App Store tab selected; any other `station:` URL — another
-  host, a deeper path, a query or fragment — is one stderr line and nothing else. The argument is
-  bounded (2 048 chars, control characters and invalid UTF-8 refused, parsed with the same WHATWG
-  parser as routing). Nothing else of the `station://` WebUI set is served (the configurator is
-  not), and a link never opens the OS browser or installs anything. **A second launch does not
-  open a second window**: on Windows a per-session mutex (`Local\station-shell-singleton`) makes
-  the first process the primary; a second one forwards its deep link — or, with no link, just
-  asks for focus — to the primary over a loopback TCP listener (`<config dir>/station/instance.json`
-  names the port and a per-run token), then exits. The primary selects the store or names-and-ignores
-  the URL and brings its window forward. The lock is per-Windows-session only; other platforms run
-  lock-free (documented `Unsupported`), and a lock failure never keeps the shell from opening.
-- **Notifications**: a hosted page raises notifications the way real pages do — `new
-  Notification(title, options)`, routed by the injected script's `window.Notification` override
-  (the port of Electron's `webview-inject.js`) into
-  `window.bxApi.notificationCenter.sendNotification(id, notification)`. Pages may also call the
-  preload's four members directly (`sendNotification` / `closeNotification` and the click-listener
-  pair; wry's `with_ipc_handler` plus one injected init script, capped at 8 listeners per page;
-  nothing else of `bxApi` is invented). The override keeps the TS contract — `title` required,
-  `notif/<nanoid>` ids, `permission`/`requestPermission` report `granted`, `close()` removes the
-  row, and `onclick`/`addEventListener('click')` fire through the same click registry. Dropped
-  from the TS: the `blob:` icon fetch (Telegram-only) and the recursive same-origin iframe
-  override. Messages are validated and
-  bounded (caps in `docs/rust-rune-port.md` "Robustness"), delivered into the ported
-  `NotificationCenter` under the sending app's group, and the panel shows them — each row drawing
-  the notification's own `icon` URL when one was sent (decoded pixels when they land, the sender's
-  letter avatar until then and for every refused/broken URL; at most 32 distinct notification
-  icons are asked for per frame, "Robustness"). A row with a tab is
-  pressable: the click marks the notification read, focuses the sender's tab (`url-router`-routed;
-  an external URL still goes through the allowlist + budget path), and delivers one
-  `window.__stationNotificationClick(<json id>)` to the sender's page, where a registered click
-  listener runs (an absent page is skipped silently). Snooze expires from the frame poll (at most
-  one scan per second). Still missing: an OS notification source and the OS "do not disturb"
-  reader behind `Snooze::SyncWithOs` (stored, never expires, never claimed to).
-- **Tray**: while the shell runs it keeps Station's notification-area icon (Rune's `Tray`:
-  `Shell_NotifyIcon` on a message-only window and thread) with the Electron tray's two-item menu
-  — **Open** brings the window forward through the single-instance focus path, **Exit** quits
-  through the one `on_quit`. A primary click focuses (Electron listened for `double-click`; Rune
-  reports one primary click as `Activate`, so the same action takes one click here). No settings
-  entry and no notification list — the TS tray had neither. Windows only; elsewhere there is no
-  tray. Observed windowed: the `RuneTray` window in the shell's process, activation restoring a
-  minimized shell with foreground, and a clean exit; the menu's look and its Exit pick are not
-  observed (the popup is modal), and neither are the icon's pixels in the notification area.
-- **Launch at login**: Settings → General has "Start Station when I sign in" on Windows, backed
-  by `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Station` — the executable path in
-  quotes, no arguments, unelevated, the same value `auto-launch@5.0.6` wrote for Electron. The
-  session records it as the additive v1 `startAtLogin` bool, and a real launch shows the
-  registry's truth; a failed read or write is said in a "Login item" row instead of a toggle that
-  lies. Other platforms draw no row (documented `Unsupported`). No start-minimized argument: the
-  TS autolaunch passed none either. The real registry write is not exercised by tests (a fake
-  login item is used), and no run here modified the user's login items.
-- **Window close**: unchanged — closing quits. Electron's tray also hid the window on *minimize*
-  when its icon was visible (`MainWindowManager`); this slice did not port that and did not
-  invent close-to-tray.
-- **Session**: app pages are recreated from their URL; per-page scroll/history, the store's
-  section and search text are not restored (the rail order and selection are). A monitor-DPI
-  change is detected each frame from the window's real DPI (`GetDpiForWindow`, 0.5–4.0×
-  accepted) and re-scales every page; a real monitor switch remains unobserved.
-- **Rail order**: the user's order is the session's `railOrder`, restored on launch and
-  reordered from Settings → My apps (move up / move down per row, written at once). The rail
-  rows themselves have no reorder keys — Rune gives a rail row no keyboard focus (D11 in
-  `docs/rust-rune-port.md`).
-- **Store**: installs/uninstalls and the tree/buckets/search render; tiles and rail rows draw the
-  manifest's real icon — fetched once per run from the manifest's `icons[0].src` URL, cached on
-  disk under `<config dir>/station/icons`, bounded (http/https only, 1 MiB body, 10 s timeout,
-  8192-px side, 1 500 files, 128 in flight — the Robustness table in `docs/rust-rune-port.md`).
-  A missing, refused, or failed icon keeps the letter avatar. No custom-app request flow in the UI.
-- **Window identity**: the window carries Station's icon (title bar + taskbar), applied once from
-  the raw handle (`WM_SETICON`, 32/64 px) using `packages/app/build/icon.ico`'s own 32 px and
-  64 px `RT_ICON` entries — the Electron build's asset, with no decode or resize
-  (`platform_icon.rs`). A windowed probe on 2026-11-18 observed `WM_GETICON` answer with a 32×32
-  `ICON_SMALL` and a 64×64 `ICON_BIG` (both confirmed through `GetIconInfo`), the class-icon
-  fallback unused (`docs/window-icon-probe.md`). Pixel appearance and taskbar rendering specifics
-  are still not photo-verified. The exe itself also carries the icon as a build-time resource:
-  `crates/station-shell/build.rs` compiles `station.rc` (one `ICON` line pointing at
-  `packages/app/build/icon.ico`) with `embed-resource`, so Explorer and the taskbar show the
-  real icon for the bare exe — no runtime change.
-- **Identity/accounts**: accounts exist as data — the session stores identities (the TS
-  `StationUserIdentity` shape, no tokens), Settings lists them under **Accounts**, and a
-  `google-account` app's Configure editor chooses a stored one, writing `appConfig.identityId`
-  through the existing config path (the tab is re-resolved; Gmail's URL stays signed-out because
-  its template's email field is empty in both implementations). What does **not** exist yet:
-  sign-in (nothing creates an identity; the empty state says so) and any token-backed call.
-  `station://` cannot be Google's OAuth redirect (a custom scheme needs a period —
-  `docs/oauth-config-options.md`), so the later callback is loopback.
-- **Packaging**: the shell runs from `cargo run`/`cargo build --release`; no installer or code
-  signing. Electron packaging is untouched.
+  `bx_use_default_session` share `webview/default`. Both are fixed when the web view is built.
+  **Permissions** (slice 30): `permissions.rs` is wired to `WebViewBuilder::with_permission_handler`,
+  denying WebView2's native web `Notifications` (routed through Station's bridge) and silent /
+  privileged APIs (`AutomaticDownloads`, `FileSystemAccess`, `LocalFonts`, `WindowManagement`,
+  `Midi`, `Sensors`, `PointerLock`, `MediaKeySystemAccess`, `Other`) while delegating interactive
+  capabilities (`Camera`, `Microphone`, `DisplayCapture`, `Geolocation`, `ClipboardRead`,
+  `Autoplay`) to WebView2's native prompt. Not reproduced: per-request HTTP header interception
+  (`accounts.google.com` UA override, localhost Referer stripping, CSP deletion), which wry does
+  not expose. **Downloads** (slice 22): page-suggested names are sanitized (including compound
+  Windows reserved names like `NUL.tar.gz`), written under OS Downloads without overwriting, capped
+  at 4 concurrent, and logged bounded; no download toaster UI.
+- **Navigation, tab actions, in-tab search & Quick Switcher**:
+  - Top bar includes Back/Fwd/Reload/Find/Star/Browser/`...`/Jump controls (`placeholder.rs`).
+  - Right-clicking a rail app or pressing `...` opens the 40 pt Rune `tab_actions_bar` (Reload,
+    Pin/Unpin favorite, Open in browser, Configure, Move up/down, Uninstall), shrinking `content`
+    cleanly below it so WebView2 never covers it (slice 26).
+  - Global shortcuts: `Escape`, `Ctrl/Cmd+K`/`T` (Bang Quick Switcher), `Ctrl/Cmd+F` (in-tab find),
+    `Ctrl/Cmd+,` (Settings), `Ctrl/Cmd+1..9` (rail jump), `Ctrl/Cmd+R`/`F5` (reload),
+    `Ctrl/Cmd+[`/`]` (back/forward), `Ctrl/Cmd+0`/`=`/`+`/`-` (per-tab zoom).
+  - **In-tab search** (slice 27, `find.rs`): 40 pt Rune bar above `content`, literal DOM search via
+    JSON-escaped `window.__stationFind` / `__stationFindClear` (no `RegExp` on user text), match
+    counts over IPC (`kind: "find"`). Verified live in Chrome via `agent-browser`.
+  - **Bang Quick Switcher & Favorites** (slice 28, `quick_switch.rs`): searches pinned favorites
+    (persisted in `session-store` v1), installed tabs ranked by `activity::frecency`, shell actions,
+    and App Store quick-install matches.
+- **About Station, fatal dialogs & crash reporting**:
+  - **About Station** (slice 24, `about.rs`): native Rune screen over `about-window`, reachable from
+    Settings → General and Quick Switcher, with v1 "Check for updates" opening GitHub Releases.
+  - **Fatal dialogs & crash reports** (slices 24 & 30, `dialogs.rs`, `crash.rs`): panic hook writes
+    bounded (8 KiB) secret-free reports to `<config dir>/station/crashes/` (pruned at 20 files),
+    and `catch_unwind` around `app.run()` shows a Win32 `MessageBoxW` (stderr fallback elsewhere).
+- **New windows, deep links & single instance**: a page's `window.open`/`target=_blank` never opens
+  an OS window (`url-router` routes to a tab or system browser). Launched and mid-run `station://`
+  deep links are validated (`deep_link.rs`) and handed off to the primary instance over loopback TCP
+  behind Windows named mutex `Local\station-shell-singleton` (`instance.rs`).
+- **Notifications, OS balloons & OS DND**: hosted pages use `new Notification(...)` or frozen
+  `window.bxApi.notificationCenter` (all 6 members including snooze listeners; `notifications/bridge.rs`).
+  Snooze changes fan out to attached pages via `window.__stationSnoozeUpdate(...)` (muting WhatsApp /
+  Messenger audio). On Windows, new unsnoozed notifications also dispatch Win32 `Shell_NotifyIconW`
+  (`NIF_INFO`) balloons with a 12/min rolling cap (`notifications/os.rs`), and `Snooze::SyncWithOs`
+  polls `SHQueryUserNotificationState` every 5 s to mirror host Focus Assist / Do Not Disturb.
+  (Win32 balloon appearance and live `SHQueryUserNotificationState` readings are cross-typechecked
+  for Windows GNU and unit-tested via fakes; visual verification requires a real Windows host.)
+- **Tray & launch at login**: Windows notification-area icon (`tray.rs`, Open/Exit) and unelevated
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Station` toggle (`autolaunch.rs`, Settings →
+  General). Closing the window quits; minimize-to-tray is not ported.
+- **Identity / Google OAuth Option B** (slices 17 & 25, `oauth.rs`): RFC 7636 PKCE (`S256`) +
+  ephemeral loopback HTTP callback (`127.0.0.1:0`, constant-length state check, strict CSP static
+  HTML, zero tokens stored on disk), configured via `GOOGLE_CLIENT_ID` (optional
+  `GOOGLE_CLIENT_SECRET`), with Settings Accounts sign-in / cancel / remove. Verified end-to-end
+  against real Chrome (`oauth::tests::live_chrome_agent_browser_oauth_callback_verify`); a live
+  round-trip against Google's production endpoint requires a human-registered Desktop OAuth client.
+- **Packaging & remaining product decisions**: `rust/packaging/installer.nsi` (per-user HKCU NSIS
+  installer with WebView2 bootstrapper and `station://` registration) is built and locally smoked;
+  clean-VM verification, code signing identity, and product decisions on Chrome extensions, password
+  managers, SDK runtime apps, and full staged auto-updater remain human-gated before Electron
+  deletion (`P6–P8`).
