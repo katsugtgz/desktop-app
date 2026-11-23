@@ -24,9 +24,19 @@ fi
 
 if [ -x "$NODE_DIR/bin/node" ]; then
   touch "$HOME/.bashrc"
-  sed -i '/case \$- in/,/esac/d' "$HOME/.bashrc" 2>/dev/null || true
   PATH_LINE="export PATH=\"$NODE_DIR/bin:\$PATH\""
-  grep -qxF "$PATH_LINE" "$HOME/.bashrc" || echo "$PATH_LINE" >> "$HOME/.bashrc"
+  HEAD_LINE="${PATH_LINE} # station-env-setup-head"
+  TAIL_LINE="${PATH_LINE} # station-env-setup-tail"
+  if ! grep -qxF "$HEAD_LINE" "$HOME/.bashrc"; then
+    TMP_BASHRC="$(mktemp)"
+    { printf '%s\n' "$HEAD_LINE"; cat "$HOME/.bashrc"; } > "$TMP_BASHRC"
+    cp "$TMP_BASHRC" "$HOME/.bashrc"
+    rm -f "$TMP_BASHRC"
+  fi
+  if ! grep -qxF "$TAIL_LINE" "$HOME/.bashrc"; then
+    [ ! -s "$HOME/.bashrc" ] || [ -z "$(tail -c 1 "$HOME/.bashrc")" ] || printf '\n' >> "$HOME/.bashrc"
+    printf '%s\n' "$TAIL_LINE" >> "$HOME/.bashrc"
+  fi
   export PATH="$NODE_DIR/bin:$PATH"
 fi
 
