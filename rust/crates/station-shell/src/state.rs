@@ -328,6 +328,8 @@ pub struct ShellState {
     frecency: activity::frecency::Frecency,
     /// Bang Quick Switcher palette state (`Ctrl+K` / `Ctrl+T`; transient).
     quick_switch: crate::quick_switch::QuickSwitchState,
+    /// Last polled host OS Do Not Disturb state (Slice 29, active under `Snooze::SyncWithOs`).
+    os_dnd_active: bool,
 }
 
 /// The settings editor's draft for one installed application.
@@ -423,6 +425,7 @@ impl ShellState {
                 activity::frecency::FrecencyOptions::default(),
             ),
             quick_switch: crate::quick_switch::QuickSwitchState::default(),
+            os_dnd_active: false,
         };
         state.rebuild_tabs();
         state
@@ -1870,14 +1873,40 @@ impl ShellState {
     /// The current snooze state as the millisecond duration sent to hosted pages
     /// (`__stationSnoozeUpdate`): `None` when not snoozed, the finite duration in ms for a timed
     /// snooze, or a positive sentinel (`u32::MAX as u64`, exact in IEEE 754 JS numbers) for
-    /// infinite / active OS-synced snooze.
+    /// infinite or active OS-synced Do Not Disturb.
     pub fn effective_snooze_duration_ms(&self) -> Option<u64> {
         match self.notifications.snooze() {
             None | Some(notification_center::Snooze::Unknown(_)) => None,
             Some(notification_center::Snooze::Finite(ms)) => Some(ms),
-            Some(notification_center::Snooze::Infinite)
-            | Some(notification_center::Snooze::SyncWithOs) => Some(u64::from(u32::MAX)),
+            Some(notification_center::Snooze::Infinite) => Some(u64::from(u32::MAX)),
+            Some(notification_center::Snooze::SyncWithOs) => {
+                self.os_dnd_active.then_some(u64::from(u32::MAX))
+            }
         }
+    }
+
+    /// True whenever notifications are currently suppressed (timed snooze, infinite, or
+    /// `Snooze::SyncWithOs` with host OS Do Not Disturb active).
+    pub fn is_effectively_snoozed(&self) -> bool {
+        self.effective_snooze_duration_ms().is_some()
+    }
+
+    /// Updates the polled host OS Do Not Disturb flag; returns true if it changed.
+    pub fn set_os_dnd_active(&mut self, active: bool) -> bool {
+        if self.os_dnd_active == active {
+            return false;
+        }
+        self.os_dnd_active = active;
+        true
+    }
+
+    /// Human-readable app name for a tab id (for OS notification titles).
+    pub fn tab_display_name(&self, tab_id: &str) -> String {
+        self.tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.label.clone())
+            .unwrap_or_else(|| "Station".to_owned())
     }
 
     /// Writes the session: after an install, an uninstall, a selection, on close and on quit.

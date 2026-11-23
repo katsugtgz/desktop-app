@@ -1,18 +1,22 @@
-//! The notification center's own module: the panel view, and the page bridge that feeds it.
+//! The notification center's own module: the panel view, the page bridge that feeds it,
+//! and OS-level DND polling + notification balloon dispatch (Slice 29).
 
 pub mod bridge;
+pub mod os;
 mod panel;
 
 #[cfg(test)]
 mod tests_notification_override;
 
-use notification_center::NotificationAction;
+use notification_center::{NotificationAction, Snooze};
 
 #[cfg(test)]
 pub use bridge::clear;
 #[cfg(any(target_os = "windows", test))]
 pub use bridge::receive;
-pub use bridge::{deliver_to, INIT_SCRIPT};
+#[cfg(test)]
+pub use bridge::{deliver_to, deliver_to_with_notifier};
+pub use bridge::{deliver_to_at, INIT_SCRIPT};
 #[cfg(test)]
 pub use panel::MAX_NOTIFICATION_ICON_URLS;
 pub use panel::{icon_urls, panel};
@@ -24,6 +28,39 @@ thread_local! {
     static WALL_AT_FIRST_POLL: Cell<Option<i64>> = const { Cell::new(None) };
     /// The frame time of the last expiry scan, for the once-per-second throttle.
     static LAST_ADVANCE: Cell<Option<f64>> = const { Cell::new(None) };
+    /// The frame time of the last OS DND poll for `Snooze::SyncWithOs`.
+    static LAST_DND_POLL: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
+/// Polls host OS Do Not Disturb / Focus Assist state at most every [`os::DND_POLL_INTERVAL_S`]
+/// seconds when `Snooze::SyncWithOs` is selected, updating `state`'s effective snooze so
+/// [`crate::webview::sync_snooze`] fans out to attached pages.
+pub fn poll_os_dnd(state: &mut ShellState, now_s: f64) -> bool {
+    poll_os_dnd_with(state, now_s, &os::SystemDndReader)
+}
+
+/// Testable seam for [`poll_os_dnd`] with an injected [`os::OsDndReader`].
+pub fn poll_os_dnd_with(state: &mut ShellState, now_s: f64, reader: &dyn os::OsDndReader) -> bool {
+    if state.notifications().snooze() != Some(Snooze::SyncWithOs) {
+        LAST_DND_POLL.with(|slot| slot.set(None));
+        return state.set_os_dnd_active(false);
+    }
+    if !now_s.is_finite() || now_s < 0.0 {
+        return false;
+    }
+    if let Some(last) = LAST_DND_POLL.with(|slot| slot.get()) {
+        if now_s - last < os::DND_POLL_INTERVAL_S {
+            return false;
+        }
+    }
+    LAST_DND_POLL.with(|slot| slot.set(Some(now_s)));
+    let active = reader.is_dnd_active();
+    state.set_os_dnd_active(active)
+}
+
+#[cfg(test)]
+pub fn reset_dnd_poll_throttle() {
+    LAST_DND_POLL.with(|slot| slot.set(None));
 }
 
 /// Drives snooze expiry from the frame's poll: a finite snooze whose deadline has passed is
@@ -37,9 +74,8 @@ thread_local! {
 /// behind the process's start (`wall_now` younger than the first poll): an expiry needs both
 /// clocks to have moved forward.
 ///
-/// `Snooze::SyncWithOs` has no reader here (no OS do-not-disturb state is polled) and
-/// `Snooze::Infinite` never ends: neither expires, by design. Recorded as a remaining gap in
-/// `docs/rust-rune-port.md`.
+/// `Snooze::SyncWithOs` tracks host OS Do Not Disturb via [`poll_os_dnd`] and
+/// `Snooze::Infinite` never ends: neither expires on a wall-clock timer.
 pub fn expire_snooze(state: &mut ShellState, now_s: f64) -> bool {
     const THROTTLE_S: f64 = 1.0;
     if !now_s.is_finite() || now_s < 0.0 {

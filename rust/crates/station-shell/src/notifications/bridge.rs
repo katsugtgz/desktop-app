@@ -747,11 +747,25 @@ fn per_source(center: &NotificationCenter) -> HashMap<String, usize> {
     counts
 }
 
-/// Drains the accepted messages into `state`: notifications into the center, page titles/badges
-/// onto their tabs (slice 20). Called by the frame's poll, on the main thread. Returns whether
-/// the view must rebuild. A source at its cap has its newest notifications refused until it
-/// marks them read; a full center refuses everything new.
+/// Drains the accepted messages into `state`: notifications into the center (plus an OS
+/// notification balloon when not snoozed and within rate cap), page titles/badges onto their
+/// tabs (slice 20), and find counts (slice 27). Called by the frame's poll, on the main thread.
+#[cfg(test)]
 pub fn deliver_to(state: &mut ShellState) -> bool {
+    deliver_to_at(state, crate::session::seconds())
+}
+
+/// Frame-clock-stamped entry called by `webview::poll_at`.
+pub fn deliver_to_at(state: &mut ShellState, now_s: f64) -> bool {
+    deliver_to_with_notifier(state, now_s, &super::os::SystemOsNotifier)
+}
+
+/// Testable seam for delivering pending page messages with an injected [`super::os::OsNotifier`].
+pub fn deliver_to_with_notifier(
+    state: &mut ShellState,
+    now_s: f64,
+    notifier: &dyn super::os::OsNotifier,
+) -> bool {
     // The bridge's pending queue is process state and every test's frame poll drains it:
     // serialized so a test that received a message delivers it itself, not through another
     // test's poll.
@@ -782,6 +796,13 @@ pub fn deliver_to(state: &mut ShellState) -> bool {
                 if !existing && (total >= MAX_TOTAL || source_count >= MAX_PER_SOURCE) {
                     continue;
                 }
+                let os_payload = (!existing).then(|| {
+                    (
+                        state.tab_display_name(&tab_id),
+                        props.title.clone(),
+                        props.body.clone(),
+                    )
+                });
                 if !existing {
                     total += 1;
                     *counts.entry(tab_id.clone()).or_default() += 1;
@@ -795,6 +816,16 @@ pub fn deliver_to(state: &mut ShellState) -> bool {
                         props,
                         options: notification_center::NewNotificationOptions::default(),
                     });
+                if let Some((app_name, title, body)) = os_payload {
+                    super::os::dispatch_if_allowed(
+                        state.is_effectively_snoozed(),
+                        now_s,
+                        notifier,
+                        &app_name,
+                        &title,
+                        body.as_deref(),
+                    );
+                }
                 changed = true;
             }
             PageMessage::Close {

@@ -470,10 +470,11 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
         focus_window();
     }
     changed |= links.changed;
-    // A page's notification messages (`bxApi.notificationCenter`), a finished snooze, and a
-    // freshly fetched icon are frame work: their threads only queue, the poll owns the state.
-    changed |= crate::notifications::deliver_to(state);
+    // A page's notification messages (`bxApi.notificationCenter`), a finished snooze, OS DND
+    // state for `Snooze::SyncWithOs`, and freshly fetched icons are frame work.
+    changed |= crate::notifications::deliver_to_at(state, clock);
     changed |= crate::notifications::expire_snooze(state, clock);
+    changed |= crate::notifications::poll_os_dnd(state, clock);
     sync_snooze(state.effective_snooze_duration_ms());
     changed |= state.poll_oauth();
     state.prefetch_icons();
@@ -1018,6 +1019,17 @@ pub fn close_all() {
         // Dropping the host closes whatever it still held; a second call is a no-op.
         *engine = None;
     });
+}
+
+/// The live Rune window's Win32 `HWND`, if `window_created` has run on this thread.
+#[cfg(target_os = "windows")]
+pub(crate) fn parent_hwnd() -> Option<windows_sys::Win32::Foundation::HWND> {
+    PARENT.with(|slot| match *slot.borrow() {
+        Some(rune::raw_window_handle::RawWindowHandle::Win32(handle)) => {
+            Some(platform::hwnd_from_isize(handle.hwnd.get()))
+        }
+        _ => None,
+    })
 }
 
 /// One page's platform implementation.

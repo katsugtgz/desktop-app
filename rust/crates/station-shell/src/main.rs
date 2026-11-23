@@ -95,6 +95,9 @@ mod tests_find;
 #[cfg(test)]
 mod tests_quick_switch;
 
+#[cfg(test)]
+mod tests_os_notifications;
+
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
@@ -148,11 +151,13 @@ fn main() {
     .on_frame_drawn(webview::after_frame)
     .on_close(|state, _| {
         state.save();
+        notifications::os::shutdown();
         webview::close_all();
         instance::shutdown();
     })
     .on_quit(|state, _| {
         state.save();
+        notifications::os::shutdown();
         webview::close_all();
         instance::shutdown();
     });
