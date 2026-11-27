@@ -38,6 +38,7 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod tray;
+mod updater;
 mod webview;
 
 #[cfg(test)]
@@ -102,6 +103,9 @@ mod tests_os_notifications;
 
 #[cfg(test)]
 mod tests_custom_apps;
+
+#[cfg(test)]
+mod tests_updater;
 
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running

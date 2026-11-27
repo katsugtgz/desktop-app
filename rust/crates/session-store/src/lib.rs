@@ -151,6 +151,12 @@ pub struct SessionState {
     /// Added to format 1 after it shipped: `#[serde(default)]` keeps existing documents readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
+    /// Whether pre-release (beta) GitHub releases are included when checking for updates (Slice 34).
+    ///
+    /// Added to format 1 after it shipped: `#[serde(default)]` keeps existing documents readable
+    /// (default `false`), and older builds ignore it — format version stays 1.
+    #[serde(default)]
+    pub include_beta_updates: bool,
 }
 
 /// One pinned favorite belonging to an installed application.

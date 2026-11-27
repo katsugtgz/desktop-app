@@ -21,6 +21,7 @@ pub const COPYRIGHT_YEAR: i32 = 2026;
 pub fn window_state(state: &ShellState) -> AboutWindowState {
     let mut info = state.about_state().clone();
     info.set_app_metadata("Station", env!("CARGO_PKG_VERSION"));
+    info.set_beta_included_in_updates(state.include_beta_updates());
     if crate::autolaunch::supported() {
         info.set_auto_launch_enabled(state.start_at_login());
     }
@@ -73,7 +74,7 @@ pub fn view(state: &ShellState, p: Paint) -> El {
                     stick_bottom: false,
                 })
                 .child(hero_card(&info, &footer_copy, p))
-                .child(updates_card(&info, p))
+                .child(updates_card(state, &info, p))
                 .child(runtime_card(&info, p)),
         )
 }
@@ -167,56 +168,127 @@ fn hero_card(info: &AboutWindowState, footer_copy: &str, p: Paint) -> El {
         )
 }
 
-fn updates_card(info: &AboutWindowState, p: Paint) -> El {
-    let status = if let Some(release) = &info.release_name {
+fn updates_card(state: &ShellState, info: &AboutWindowState, p: Paint) -> El {
+    let status = if info.checking_update {
+        "Checking GitHub Releases...".to_owned()
+    } else if let Some(release) = &info.release_name {
         format!("Update available: {release}")
-    } else if info.checking_update {
-        "Opened GitHub Releases in your browser.".to_owned()
+    } else if let Some(err) = state.update_error() {
+        format!("Update check failed: {err}")
+    } else if state.update_checked() {
+        format!("Station {} is up to date.", info.app_version)
     } else {
-        "Manual updates: open GitHub Releases to check for newer builds.".to_owned()
+        "Check GitHub Releases for newer builds.".to_owned()
     };
 
-    section(
-        "about-updates",
-        "Updates",
-        p,
-        vec![row()
-            .key("about-updates-row")
+    let check_caption = if info.checking_update {
+        "Checking..."
+    } else if state.update_error().is_some() {
+        "Retry"
+    } else {
+        "Check for updates"
+    };
+
+    let mut actions = row().key("about-updates-actions").gap(space::S2).center_y();
+    if info.update_available && state.update_url().is_some() {
+        actions = actions.child(
+            el().key("about-open-release")
+                .role("button")
+                .label("Download release")
+                .focusable(true)
+                .h(28.0)
+                .px(space::S3)
+                .center()
+                .radius(radius::SM)
+                .fill(tok::accent(0, p.dark))
+                .hover(p.t.hover)
+                .press(p.t.press)
+                .on_press(|state: &mut ShellState| {
+                    state.open_update_release();
+                })
+                .child(
+                    text("Download release")
+                        .font(type_::LABEL)
+                        .color(rune::color::hex("#FFFFFF").unwrap_or(p.t.text))
+                        .a11y_hidden(),
+                ),
+        );
+    }
+    actions = actions.child(
+        el().key("about-check-updates")
+            .role("button")
+            .label("Check for updates")
+            .focusable(true)
+            .h(28.0)
             .px(space::S3)
-            .py(space::S2)
-            .gap(space::S3)
-            .center_y()
-            .justify_between()
+            .center()
+            .radius(radius::SM)
+            .fill(p.t.control_track)
+            .hover(p.t.hover)
+            .press(p.t.press)
+            .on_press(|state: &mut ShellState| {
+                state.check_for_updates();
+            })
             .child(
-                text(status)
-                    .key("about-updates-status")
-                    .font(type_::BODY)
-                    .color(p.t.text_secondary)
-                    .truncate(),
-            )
-            .child(
-                el().key("about-check-updates")
-                    .role("button")
-                    .label("Check for updates")
-                    .focusable(true)
-                    .h(28.0)
-                    .px(space::S3)
-                    .center()
-                    .radius(radius::SM)
-                    .fill(p.t.control_track)
-                    .hover(p.t.hover)
-                    .press(p.t.press)
-                    .on_press(|state: &mut ShellState| {
-                        state.check_for_updates();
-                    })
-                    .child(
-                        text("Check for updates")
-                            .font(type_::LABEL)
-                            .color(p.t.text)
-                            .a11y_hidden(),
-                    ),
-            )],
-    )
+                text(check_caption)
+                    .font(type_::LABEL)
+                    .color(p.t.text)
+                    .a11y_hidden(),
+            ),
+    );
+
+    let status_row = row()
+        .key("about-updates-row")
+        .px(space::S3)
+        .py(space::S2)
+        .gap(space::S3)
+        .center_y()
+        .justify_between()
+        .child(
+            text(status)
+                .key("about-updates-status")
+                .font(type_::BODY)
+                .color(if state.update_error().is_some() && !info.checking_update {
+                    rune::color::hex("#EF5757").unwrap_or(p.t.text_secondary)
+                } else {
+                    p.t.text_secondary
+                })
+                .truncate(),
+        )
+        .child(actions);
+
+    let beta_row = row()
+        .key("about-include-beta")
+        .role("switch")
+        .label("Include beta releases")
+        .checked(info.beta_included_in_updates)
+        .h(36.0)
+        .px(space::S3)
+        .center_y()
+        .justify_between()
+        .hover(p.t.hover)
+        .press(p.t.press)
+        .on_press(|state: &mut ShellState| {
+            state.toggle_include_beta_updates();
+        })
+        .child(
+            text("Include beta releases")
+                .font(type_::BODY)
+                .color(p.t.text)
+                .a11y_hidden(),
+        )
+        .child(
+            text(if info.beta_included_in_updates {
+                "On"
+            } else {
+                "Off"
+            })
+            .key("about-include-beta-value")
+            .font(type_::MONO_CAPTION)
+            .color(p.t.text_secondary),
+        );
+
+    section("about-updates", "Updates", p, vec![status_row, beta_row])
 }
 
 fn runtime_card(info: &AboutWindowState, p: Paint) -> El {

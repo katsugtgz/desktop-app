@@ -480,6 +480,7 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     sync_snooze(state.effective_snooze_duration_ms());
     changed |= state.apply_download_events(crate::downloads::drain_events());
     changed |= state.poll_oauth();
+    changed |= state.poll_updates();
     state.prefetch_icons();
     changed |= state.drain_icons();
     changed

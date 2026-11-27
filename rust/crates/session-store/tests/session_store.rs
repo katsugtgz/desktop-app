@@ -94,6 +94,7 @@ fn full_state() -> SessionState {
             url: "https://app.slack.com/client".to_owned(),
         }],
         download_dir: Some("/tmp/station-downloads".to_owned()),
+        include_beta_updates: true,
     }
 }
 
@@ -1043,4 +1044,26 @@ fn download_dir_round_trips_and_refuses_empty_control_or_oversized_paths() {
         before,
         "refused downloadDir saves must leave the previous file intact"
     );
+}
+
+#[test]
+fn include_beta_updates_defaults_false_and_round_trips_as_camel_case() {
+    let dir = TempDir::new("beta-updates");
+    let store = dir.store();
+
+    let default_state = store.load().expect("default load");
+    assert!(!default_state.include_beta_updates);
+
+    let enabled = SessionState {
+        include_beta_updates: true,
+        ..SessionState::default()
+    };
+    store.save(&enabled).expect("save includeBetaUpdates");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&read_bytes(&dir.path().join("session.json"))).expect("json");
+    assert_eq!(doc["includeBetaUpdates"], true);
+    assert_eq!(doc["version"], FORMAT_VERSION);
+
+    let loaded = store.load().expect("reload includeBetaUpdates");
+    assert!(loaded.include_beta_updates);
 }

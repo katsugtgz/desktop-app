@@ -317,6 +317,14 @@ pub struct ShellState {
     config_draft: Option<ConfigDraft>,
     /// Metadata and update-check state for the About Station surface (`about-window` crate).
     about_state: about_window::AboutWindowState,
+    /// Persisted preference for including prerelease (beta) GitHub releases (Slice 34).
+    include_beta_updates: bool,
+    /// Trusted GitHub release URL from the latest successful update check (memory-only).
+    update_url: Option<String>,
+    /// Transient error message from the most recent failed update check (memory-only).
+    update_error: Option<String>,
+    /// True once at least one update check completed cleanly in this run (memory-only).
+    update_checked: bool,
     /// Google OAuth Option B client config (from `GOOGLE_CLIENT_ID` / optional secret).
     oauth_config: Option<crate::oauth::OAuthConfig>,
     /// Transient sign-in status or error message shown in Settings (never persisted).
@@ -460,6 +468,10 @@ impl ShellState {
             icons: crate::icons::IconStore::new(),
             config_draft: None,
             about_state: about_window::AboutWindowState::default(),
+            include_beta_updates: false,
+            update_url: None,
+            update_error: None,
+            update_checked: false,
             oauth_config: crate::oauth::OAuthConfig::from_env(),
             oauth_status: None,
             zoom: BTreeMap::new(),
@@ -521,6 +533,7 @@ impl ShellState {
         let identities = std::mem::take(&mut stored.identities);
         let favorites = std::mem::take(&mut stored.favorites);
         let download_dir = stored.download_dir.take();
+        let include_beta_updates = stored.include_beta_updates;
         let mut service = service;
         let mut replayed = true;
         if !(stored.installed.is_empty() && stored.dock.is_empty() && stored.tabs.is_empty()) {
@@ -537,6 +550,10 @@ impl ShellState {
         state.window = window;
         state.theme = theme;
         state.start_at_login = stored.start_at_login;
+        state.include_beta_updates = include_beta_updates;
+        state
+            .about_state
+            .set_beta_included_in_updates(include_beta_updates);
         state.identities = identities;
         state.download_dir = download_dir.clone();
         if let Some(dir) = download_dir {
@@ -2147,12 +2164,117 @@ impl ShellState {
         &self.about_state
     }
 
-    /// V1 update check: records the check in `AboutWindowState` and opens GitHub Releases in the
-    /// OS browser (no-op browser spawn under unit tests).
+    /// Whether prerelease (beta) builds are included when checking GitHub Releases.
+    pub fn include_beta_updates(&self) -> bool {
+        self.include_beta_updates
+    }
+
+    /// Toggles beta update inclusion and persists immediately to the session document.
+    pub fn toggle_include_beta_updates(&mut self) {
+        self.include_beta_updates = !self.include_beta_updates;
+        self.about_state
+            .set_beta_included_in_updates(self.include_beta_updates);
+        self.persist();
+    }
+
+    /// Trusted GitHub release page URL discovered by the latest update check.
+    pub fn update_url(&self) -> Option<&str> {
+        self.update_url.as_deref()
+    }
+
+    /// Latest update-check error message, if any.
+    pub fn update_error(&self) -> Option<&str> {
+        self.update_error.as_deref()
+    }
+
+    /// True once an update check has completed cleanly in this run.
+    pub fn update_checked(&self) -> bool {
+        self.update_checked
+    }
+
+    /// Opens the discovered release page (or the repository Releases index) in the OS browser.
+    pub fn open_update_release(&self) {
+        let target = self
+            .update_url
+            .as_deref()
+            .unwrap_or(crate::about::RELEASES_URL);
+        crate::routing::open_external(target);
+    }
+
+    /// Starts an asynchronous GitHub Releases check against the current package version.
+    ///
+    /// Unit tests do not hit live GitHub by default; use [`Self::check_for_updates_with`] to drive
+    /// the background worker against a fake fetcher.
     pub fn check_for_updates(&mut self) {
-        self.about_state.set_checking_for_update(true);
+        #[cfg(test)]
+        {
+            self.about_state.set_checking_for_update(true);
+            self.update_error = None;
+        }
         #[cfg(not(test))]
-        crate::routing::open_external(crate::about::RELEASES_URL);
+        {
+            self.check_for_updates_with(
+                env!("CARGO_PKG_VERSION"),
+                std::sync::Arc::new(crate::updater::GitHubReleaseFetcher::default()),
+            );
+        }
+    }
+
+    /// Starts an asynchronous update check against any [`crate::updater::UpdateFetcher`].
+    pub fn check_for_updates_with(
+        &mut self,
+        current_version: &str,
+        fetcher: std::sync::Arc<dyn crate::updater::UpdateFetcher>,
+    ) {
+        self.update_error = None;
+        match crate::updater::start_check(
+            current_version.to_owned(),
+            self.include_beta_updates,
+            fetcher,
+            crate::routing::current_waker(),
+        ) {
+            Ok(()) => {
+                self.about_state.set_checking_for_update(true);
+            }
+            Err(crate::updater::UpdateError::AlreadyChecking) => {
+                self.about_state.set_checking_for_update(true);
+            }
+            Err(why) => {
+                self.about_state.set_checking_for_update(false);
+                self.update_error = Some(why.to_string());
+            }
+        }
+    }
+
+    /// Drains a finished background update check into `AboutWindowState`. Returns true when UI
+    /// state changed.
+    pub fn poll_updates(&mut self) -> bool {
+        let Some(result) = crate::updater::take_completed() else {
+            return false;
+        };
+        self.about_state.set_checking_for_update(false);
+        match result {
+            Ok(crate::updater::UpdateCheckOutcome::Available {
+                release_name,
+                html_url,
+            }) => {
+                self.about_state.set_update_is_available(release_name);
+                self.update_url = Some(html_url);
+                self.update_error = None;
+                self.update_checked = true;
+            }
+            Ok(crate::updater::UpdateCheckOutcome::UpToDate) => {
+                self.about_state.update_available = false;
+                self.about_state.release_name = None;
+                self.update_url = None;
+                self.update_error = None;
+                self.update_checked = true;
+            }
+            Err(why) => {
+                self.update_error = Some(why.to_string());
+            }
+        }
+        true
     }
 
     /// The rail's moon button: the notification panel opens over the content area, and closes
@@ -2493,6 +2615,7 @@ impl ShellState {
                 .cloned()
                 .collect(),
             download_dir: self.download_dir.clone(),
+            include_beta_updates: self.include_beta_updates,
         }
     }
 }
