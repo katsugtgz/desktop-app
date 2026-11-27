@@ -18,9 +18,23 @@ jobs:
         with:
           workspaces: rust
 
+      - name: Resolve installer version
+        id: version
+        working-directory: rust
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not read Cargo workspace metadata" }
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'station-shell' }).version
+          if (-not $version) { throw "station-shell version is missing from Cargo metadata" }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match the station-shell version v$version"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
       - name: Build release shell
         working-directory: rust
-        run: cargo build --release -p station-shell
+        run: cargo build --locked --release -p station-shell
 
       - name: Install NSIS
         run: choco install nsis -y --no-progress
@@ -30,19 +44,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force rust/packaging/dist | Out-Null
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "rust/packaging/dist/MicrosoftEdgeWebview2Setup.exe"
-
-      - name: Resolve installer version
-        id: version
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}"
-          if ($version.StartsWith("v")) { $version = $version.Substring(1) }
-          if ($version -notmatch '^\d+\.\d+') {
-            $line = Select-String -Path rust/Cargo.toml -Pattern '^version = "([0-9][^"]*)"' | Select-Object -First 1
-            if ($line) { $version = $line.Matches[0].Groups[1].Value }
-          }
-          if (-not $version) { $version = "0.0.0" }
-          "value=$version" >> $env:GITHUB_OUTPUT
 
       - name: Build installer
         shell: pwsh

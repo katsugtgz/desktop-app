@@ -800,12 +800,11 @@ fn per_source(center: &NotificationCenter) -> HashMap<String, usize> {
 /// main thread.
 #[cfg(test)]
 pub fn deliver_to(state: &mut ShellState) -> bool {
-    deliver_to_at(state, crate::session::seconds())
-}
-
-/// Frame-clock-stamped entry called by `webview::poll_at`.
-pub fn deliver_to_at(state: &mut ShellState, now_s: f64) -> bool {
-    deliver_to_with_notifier(state, now_s, &super::os::SystemOsNotifier)
+    deliver_to_with_notifier(
+        state,
+        crate::session::seconds(),
+        &super::os::SystemOsNotifier,
+    )
 }
 
 /// Testable seam for delivering pending page messages with an injected [`super::os::OsNotifier`].

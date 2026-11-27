@@ -474,9 +474,7 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     // A page's notification messages (`bxApi.notificationCenter`), a finished snooze, OS DND
     // state for `Snooze::SyncWithOs`, download lifecycle notices, and freshly fetched icons are
     // frame work.
-    changed |= crate::notifications::deliver_to_at(state, clock);
-    changed |= crate::notifications::expire_snooze(state, clock);
-    changed |= crate::notifications::poll_os_dnd(state, clock);
+    changed |= crate::notifications::poll(state, clock);
     sync_snooze(state.effective_snooze_duration_ms());
     changed |= state.apply_download_events(crate::downloads::drain_events());
     changed |= state.poll_oauth();

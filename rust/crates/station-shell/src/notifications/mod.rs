@@ -14,9 +14,9 @@ use notification_center::{NotificationAction, Snooze};
 pub use bridge::clear;
 #[cfg(any(target_os = "windows", test))]
 pub use bridge::receive;
+pub use bridge::INIT_SCRIPT;
 #[cfg(test)]
 pub use bridge::{deliver_to, deliver_to_with_notifier};
-pub use bridge::{deliver_to_at, INIT_SCRIPT};
 #[cfg(test)]
 pub use panel::MAX_NOTIFICATION_ICON_URLS;
 pub use panel::{icon_urls, panel};
@@ -32,14 +32,24 @@ thread_local! {
     static LAST_DND_POLL: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
-/// Polls host OS Do Not Disturb / Focus Assist state at most every [`os::DND_POLL_INTERVAL_S`]
-/// seconds when `Snooze::SyncWithOs` is selected, updating `state`'s effective snooze so
-/// [`crate::webview::sync_snooze`] fans out to attached pages.
-pub fn poll_os_dnd(state: &mut ShellState, now_s: f64) -> bool {
-    poll_os_dnd_with(state, now_s, &os::SystemDndReader)
+/// Updates snooze before processing new notifications so dispatch uses the current setting.
+pub fn poll(state: &mut ShellState, now_s: f64) -> bool {
+    poll_with(state, now_s, &os::SystemDndReader, &os::SystemOsNotifier)
 }
 
-/// Testable seam for [`poll_os_dnd`] with an injected [`os::OsDndReader`].
+pub(crate) fn poll_with(
+    state: &mut ShellState,
+    now_s: f64,
+    reader: &dyn os::OsDndReader,
+    notifier: &dyn os::OsNotifier,
+) -> bool {
+    let mut changed = expire_snooze(state, now_s);
+    changed |= poll_os_dnd_with(state, now_s, reader);
+    changed |= bridge::deliver_to_with_notifier(state, now_s, notifier);
+    changed
+}
+
+/// Refreshes effective `Snooze::SyncWithOs` at most every [`os::DND_POLL_INTERVAL_S`] seconds.
 pub fn poll_os_dnd_with(state: &mut ShellState, now_s: f64, reader: &dyn os::OsDndReader) -> bool {
     if state.notifications().snooze() != Some(Snooze::SyncWithOs) {
         LAST_DND_POLL.with(|slot| slot.set(None));
@@ -74,7 +84,7 @@ pub fn reset_dnd_poll_throttle() {
 /// behind the process's start (`wall_now` younger than the first poll): an expiry needs both
 /// clocks to have moved forward.
 ///
-/// `Snooze::SyncWithOs` tracks host OS Do Not Disturb via [`poll_os_dnd`] and
+/// `Snooze::SyncWithOs` tracks host OS Do Not Disturb via [`poll_os_dnd_with`] and
 /// `Snooze::Infinite` never ends: neither expires on a wall-clock timer.
 pub fn expire_snooze(state: &mut ShellState, now_s: f64) -> bool {
     const THROTTLE_S: f64 = 1.0;

@@ -413,7 +413,7 @@ fn a_hidden_panel_asks_for_nothing() {
     state.toggle_notifications();
     state.prefetch_icons();
     for _ in 0..200 {
-        if !notify_asks(&asked).is_empty() {
+        if notify_asks(&asked).len() == 2 {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));

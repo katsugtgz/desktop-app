@@ -9,6 +9,7 @@ Station is a native Rust desktop workspace browser built with **Rune** (native G
 - **Rust stable toolchain** (see [`rust/rust-toolchain.toml`](rust/rust-toolchain.toml) or install via [rustup](https://rustup.rs))
 - **Windows 10/11 (x64, MSVC)** for running the desktop shell with live WebView2 pages (WebView2 Evergreen runtime is preinstalled on Windows 10/11 via Microsoft Edge)
 - Linux/macOS hosts can build, lint, test all 13 workspace crates, render headless Rune snapshots (`--snap`), and cross-typecheck Windows paths via `x86_64-pc-windows-gnu`
+- On Debian/Ubuntu, install Rune's build dependencies with `sudo apt-get install libxkbcommon-dev libxkbcommon-x11-dev`.
 
 ## Build, Run & Test
 

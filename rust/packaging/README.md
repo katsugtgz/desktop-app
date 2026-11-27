@@ -113,10 +113,10 @@ uploaded. Azure Artifact Signing is not wired yet (human decision 1 in the plan)
 
 ## CI
 
-`package-windows` in `.github/workflows/release-candidate.yml` and `.github/workflows/release.yml`
-builds the release binary, installs NSIS, downloads the bootstrapper, runs
-`makensis /DVERSION=<tag>`, and uploads `release/station-shell-setup-<ver>.exe` as the
-`station-shell-setup-<ver>` artifact. Test workflows are untouched.
+`package-windows` in `.github/workflows/release-candidate.yml` reads the `station-shell` version
+from Cargo metadata. For tagged builds, the tag must be `v<version>` to match the version the shell
+reports in About and uses for update checks. The job builds the release binary, installs NSIS,
+downloads the bootstrapper, and uploads `release/station-shell-setup-<version>.exe`.
 
 ## Local build record (2026-11-18, this workstation)
 

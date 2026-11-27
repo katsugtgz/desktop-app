@@ -7,7 +7,7 @@ use appstore_service::ApplicationService;
 
 use crate::notifications::os::{self, OsDndReader, OsNotifier};
 use crate::notifications::{
-    clear, deliver_to_with_notifier, poll_os_dnd_with, receive, reset_dnd_poll_throttle,
+    clear, deliver_to_with_notifier, poll_os_dnd_with, poll_with, receive, reset_dnd_poll_throttle,
 };
 use crate::state::{AppTab, ShellState};
 use crate::webview::fake::{Event, FakeWebview};
@@ -147,20 +147,20 @@ fn new_page_notification_dispatches_os_balloon_unless_snoozed_or_duplicate() {
     assert!(deliver_to_with_notifier(&mut state, 11.0, &notifier));
     assert_eq!(notifier.0.borrow().len(), 1);
 
-    // While SyncWithOs DND is active, new notifications enter center but OS balloon is suppressed.
+    // A notification queued before the first SyncWithOs poll still respects system DND.
     state.snooze_notifications(Some(notification_center::SYNC_WITH_OS));
     let dnd_on = FakeDnd {
         active: Cell::new(true),
         reads: Cell::new(0),
     };
-    assert!(poll_os_dnd_with(&mut state, 20.0, &dnd_on));
     assert!(receive(
         "gmail",
         &tabs,
         r#"{"kind":"send","id":"n2","notification":{"title":"Quiet mail"}}"#
     )
     .accepted());
-    assert!(deliver_to_with_notifier(&mut state, 21.0, &notifier));
+    assert!(poll_with(&mut state, 21.0, &dnd_on, &notifier));
+    assert_eq!(dnd_on.reads.get(), 1);
     assert_eq!(state.notifications().unread_count(), 2);
     assert_eq!(
         notifier.0.borrow().len(),
