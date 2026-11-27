@@ -64,14 +64,36 @@ fn all_14_legacy_service_ids_resolve_to_static_scripts() {
 
         let combined = site_scripts::combined_init_script(Some(service));
         assert!(combined.starts_with(INIT_SCRIPT));
+        assert!(combined.contains(site_scripts::CHROME_COMPAT_SCRIPT));
         assert!(combined.contains(script));
     }
     assert_eq!(site_scripts::for_service("unknown-app"), None);
-    assert_eq!(site_scripts::combined_init_script(None), INIT_SCRIPT);
+    let base_combined = format!("{INIT_SCRIPT}\n{}", site_scripts::CHROME_COMPAT_SCRIPT);
+    assert_eq!(site_scripts::combined_init_script(None), base_combined);
     assert_eq!(
         site_scripts::combined_init_script(Some("unknown-app")),
-        INIT_SCRIPT
+        base_combined
     );
+}
+
+#[test]
+fn chrome_compat_shims_match_preload_inventory_and_stay_safe() {
+    let shims = site_scripts::CHROME_COMPAT_SCRIPT;
+    assert!(shims.starts_with("(() => {"));
+    assert!(!shims.contains("eval("));
+    assert!(!shims.contains("new Function("));
+    for needle in [
+        "webstore: true",
+        "!window.chrome.runtime",
+        "sendMessage",
+        "sendNativeMessage",
+        "delete window.chrome.runtime.lastError",
+        "_docs_chrome_extension_exists",
+        "_docs_chrome_extension_features_version",
+        "_docs_chrome_extension_permissions",
+    ] {
+        assert!(shims.contains(needle), "missing {needle} in chrome shims");
+    }
 }
 
 #[test]

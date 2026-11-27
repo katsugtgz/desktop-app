@@ -50,11 +50,86 @@ pub const SUPPORTED_SERVICES: [&str; 14] = [
     "whatsapp",
 ];
 
-/// Composes the core `INIT_SCRIPT` with the app's optional per-site script.
+/// Non-clobbering Chrome compatibility shims ported from
+/// `packages/app/src/static/preload/preload.js:110-220` (`docs/preload-inventory.md` §4.3 step 4):
+/// - `window.chrome.webstore = true` (fixes Qonto and web apps checking for Chrome)
+/// - `window.chrome.runtime` stub (`connect`, `sendMessage`, `sendNativeMessage` with temporary
+///   `lastError` callback semantics, fixing Google Drive previews when using a Chrome UA)
+/// - Google Docs/Drive offline markers (`_docs_chrome_extension_*`) preventing copy/paste popups
+///
+/// Never overwrites an existing `window.chrome.runtime` or user-defined properties.
+pub const CHROME_COMPAT_SCRIPT: &str = r#"(() => {
+  try {
+    if (typeof window.chrome === 'undefined' || window.chrome === null) {
+      window.chrome = { webstore: true };
+    } else if (typeof window.chrome === 'object' && !('webstore' in window.chrome)) {
+      window.chrome.webstore = true;
+    }
+
+    if (window.chrome && typeof window.chrome === 'object' && !window.chrome.runtime) {
+      const callWithError = (responseCallback, errorMessage) => {
+        window.chrome.runtime.lastError = { message: errorMessage };
+        try {
+          responseCallback();
+        } finally {
+          delete window.chrome.runtime.lastError;
+        }
+      };
+
+      window.chrome.runtime = {
+        connect: () => ({
+          onMessage: {
+            addListener: () => {},
+            removeListener: () => {},
+          },
+          postMessage: () => {},
+          disconnect: () => {},
+        }),
+        sendMessage: (extensionId, message, options, responseCallback) => {
+          let cb = responseCallback;
+          if (typeof options === 'function') cb = options;
+          if (!cb) return;
+          if (typeof cb !== 'function') {
+            throw new Error(
+              'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function responseCallback): No matching signature.'
+            );
+          }
+          callWithError(cb, 'Could not establish connection. Receiving end does not exist.');
+        },
+        sendNativeMessage: (application, message, responseCallback) => {
+          if (!responseCallback) return;
+          if (typeof responseCallback !== 'function') {
+            throw new Error(
+              'Error in invocation of runtime.sendNativeMessage(string application, object message, function responseCallback): No matching signature.'
+            );
+          }
+          callWithError(
+            responseCallback,
+            'Could not establish connection. Receiving end does not exist.'
+          );
+        },
+      };
+    }
+
+    if (typeof window._docs_chrome_extension_exists === 'undefined') {
+      window._docs_chrome_extension_exists = true;
+      window._docs_chrome_extension_features_version = 1;
+      window._docs_chrome_extension_permissions = [
+        'alarms',
+        'clipboardRead',
+        'clipboardWrite',
+        'storage',
+        'unlimitedStorage',
+      ];
+    }
+  } catch (e) {}
+})();"#;
+
+/// Composes the core `INIT_SCRIPT`, Chrome compatibility shims, and the app's optional per-site script.
 pub fn combined_init_script(legacy_service_id: Option<&str>) -> String {
     match legacy_service_id.and_then(for_service) {
-        Some(site) => format!("{INIT_SCRIPT}\n{site}"),
-        None => INIT_SCRIPT.to_owned(),
+        Some(site) => format!("{INIT_SCRIPT}\n{CHROME_COMPAT_SCRIPT}\n{site}"),
+        None => format!("{INIT_SCRIPT}\n{CHROME_COMPAT_SCRIPT}"),
     }
 }
 

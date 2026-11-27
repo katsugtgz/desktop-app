@@ -105,6 +105,9 @@ pub struct AppTab {
     /// The page's `browserx-badge` meta, normalized with [`tab_model::Badge`]'s TS rule; `None`
     /// means no badge (missing meta or an empty one).
     pub badge: Option<Badge>,
+    /// The page's `<link rel~="icon">` URL (`http://`/`https://`, Slice 31). Memory-only, never
+    /// persisted; falls back cleanly to [`Self::icon`] whenever absent or not yet decoded.
+    pub page_favicon: Option<String>,
     /// The manifest's `bx_override_user_agent`: the UA Electron's `<webview useragent>`
     /// attribute gave this app's page. `None` means the session's default UA.
     pub user_agent: Option<String>,
@@ -128,6 +131,7 @@ impl AppTab {
             configurable: false,
             page_title: None,
             badge: None,
+            page_favicon: None,
             user_agent: None,
             use_default_session: false,
             legacy_service_id: None,
@@ -145,6 +149,7 @@ impl AppTab {
             configurable: false,
             page_title: None,
             badge: None,
+            page_favicon: None,
             user_agent: None,
             use_default_session: false,
             legacy_service_id: None,
@@ -515,12 +520,27 @@ impl ShellState {
     /// `reconcile_rail_order` keeps the two views in step first.
     fn rebuild_tabs(&mut self) {
         self.reconcile_rail_order();
-        // Page-derived presentation (slice 20) survives a rebuild (an install, a config change,
-        // a reorder): it is keyed by tab id, and a tab that leaves drops its entry with it.
-        let previous: std::collections::HashMap<String, (Option<String>, Option<Badge>)> = self
+        // Page-derived presentation (slices 20/31) survives a rebuild (an install, a config
+        // change, a reorder): it is keyed by tab id, and a tab that leaves drops its entry with
+        // it.
+        struct PagePresentation {
+            title: Option<String>,
+            badge: Option<Badge>,
+            favicon: Option<String>,
+        }
+        let previous: std::collections::HashMap<String, PagePresentation> = self
             .tabs
             .iter()
-            .map(|tab| (tab.id.clone(), (tab.page_title.clone(), tab.badge.clone())))
+            .map(|tab| {
+                (
+                    tab.id.clone(),
+                    PagePresentation {
+                        title: tab.page_title.clone(),
+                        badge: tab.badge.clone(),
+                        favicon: tab.page_favicon.clone(),
+                    },
+                )
+            })
             .collect();
         // Ids first: the service borrows end where the per-tab resolution starts.
         let docked: Vec<String> = self.rail_order.clone();
@@ -572,9 +592,10 @@ impl ShellState {
                     configurable,
                 )
             };
-            if let Some((title, badge)) = previous.get(&tab.id) {
-                tab.page_title = title.clone();
-                tab.badge = badge.clone();
+            if let Some(prev) = previous.get(&tab.id) {
+                tab.page_title = prev.title.clone();
+                tab.badge = prev.badge.clone();
+                tab.page_favicon = prev.favicon.clone();
             }
             tabs.push(tab);
         }
@@ -1323,11 +1344,14 @@ impl ShellState {
         &self.results
     }
 
-    /// Queues the fetch for every app the shell can draw an icon for (the rail's tabs and the
-    /// store's lists). Called from the frame poll — the view never mutates state, so the
-    /// asking happens here; once per URL per run.
+    /// Queues the fetch for every app the shell can draw an icon for (the rail's tabs, live page
+    /// favicons, and the store's lists). Called from the frame poll — the view never mutates
+    /// state, so the asking happens here; once per URL per run.
     pub fn prefetch_icons(&mut self) {
         for tab in &self.tabs {
+            if let Some(favicon) = tab.page_favicon.as_deref() {
+                self.icons.pixels(favicon);
+            }
             self.icons.pixels(&tab.icon);
         }
         // The notification panel's rows, only while it is the surface (slice 16). The panel
@@ -1371,6 +1395,15 @@ impl ShellState {
     /// fetch that has not landed (or failed): the view draws its letter avatar.
     pub fn icon_pixels(&self, url: &str) -> Option<&rune::Pixels> {
         self.icons.pixels_read(url)
+    }
+
+    /// The pixels drawing a rail tab: the decoded live page favicon when present and ready,
+    /// falling back to the manifest icon (and then the letter avatar when neither is decoded).
+    pub fn tab_icon_pixels(&self, tab: &AppTab) -> Option<&rune::Pixels> {
+        tab.page_favicon
+            .as_deref()
+            .and_then(|url| self.icons.pixels_read(url))
+            .or_else(|| self.icons.pixels_read(&tab.icon))
     }
 
     /// The letter-avatar identity for `application_id` (the notification panel's row icons):
@@ -1482,6 +1515,37 @@ impl ShellState {
             return false;
         }
         tab.badge = next;
+        true
+    }
+
+    /// A page's `<link rel~="icon">` URL (`Some`) or its removal (`None`) for its tab (Slice 31).
+    /// Non-fetchable URLs are ignored so the current icon stays intact. True when changed; never
+    /// persisted.
+    pub fn set_page_favicon(&mut self, tab_id: &str, url: Option<&str>) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id && tab.kind == TabKind::Web)
+        else {
+            return false;
+        };
+        let next = match url {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if crate::icons::is_fetchable(trimmed) {
+                    Some(trimmed.to_owned())
+                } else {
+                    return false;
+                }
+            }
+            None => None,
+        };
+        if tab.page_favicon == next {
+            return false;
+        }
+        tab.page_favicon = next;
         true
     }
 

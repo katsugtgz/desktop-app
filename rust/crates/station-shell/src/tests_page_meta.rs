@@ -386,6 +386,7 @@ fn the_injected_observer_builds_the_messages_this_shell_parses() {
     assert!(script.contains("meta.name.slice('browserx-'.length)"));
     assert!(script.contains("postPageMeta({ kind: 'meta', metas: values });"));
     assert!(script.contains("postPageMeta({ kind: 'title', title: title });"));
+    assert!(script.contains("postPageMeta({ kind: 'favicon', url: url });"));
     assert!(script.contains("const title = document.title;"));
     assert!(script.contains("new MutationObserver"));
     assert!(
@@ -393,7 +394,80 @@ fn the_injected_observer_builds_the_messages_this_shell_parses() {
     );
     assert!(script.contains("if (encoded === sentMetas) return;"));
     assert!(script.contains("if (title === sentTitle) return;"));
+    assert!(script.contains("if (url === sentFavicon) return;"));
     assert!(script.contains(
         "document.addEventListener('DOMContentLoaded', observePageMeta, { once: true });"
     ));
+}
+
+fn favicon_message(url: &str) -> String {
+    serde_json::json!({ "kind": "favicon", "url": url }).to_string()
+}
+
+#[test]
+fn page_favicon_updates_tab_refuses_hostile_schemes_and_clears_back_to_manifest() {
+    let _serial = crate::tests_pages::bridge_lock();
+    clear();
+    let mut rt = runtime(gmail_state("page-favicon"));
+    rt.frame(1.0 / 60.0);
+
+    let url = "https://mail.google.com/favicon.ico";
+    assert_eq!(
+        send(&mut rt, "gmail", &favicon_message(url)),
+        Outcome::Accepted
+    );
+    assert_eq!(rt.state.active().page_favicon.as_deref(), Some(url));
+
+    // Hostile schemes and oversized URLs are refused without disturbing the active favicon.
+    for bad in [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "data:image/png;base64,AAAA",
+        "https://mail.google.com/bad\nicon.png",
+        &format!("https://mail.google.com/{}", "a".repeat(2100)),
+    ] {
+        assert_eq!(
+            send(&mut rt, "gmail", &favicon_message(bad)),
+            Outcome::Refused(Refusal::BadText),
+            "expected refusal for {bad}"
+        );
+        assert_eq!(rt.state.active().page_favicon.as_deref(), Some(url));
+    }
+
+    // Empty string clears the override so the manifest icon returns.
+    assert_eq!(
+        send(&mut rt, "gmail", &favicon_message("")),
+        Outcome::Accepted
+    );
+    assert_eq!(rt.state.active().page_favicon, None);
+}
+
+#[test]
+fn page_favicon_survives_rebuild_and_stays_out_of_session_json() {
+    let _serial = crate::tests_pages::bridge_lock();
+    let path = std::env::temp_dir().join(format!(
+        "station-shell-page-favicon-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = ShellState::launch_in(ApplicationService::for_tests("favicon-persist"), &path);
+    assert!(state.install("station-manifest://14"));
+    let gmail = state.active().id.clone();
+    let fav = "https://mail.google.com/live-favicon.png";
+    assert!(state.set_page_favicon(&gmail, Some(fav)));
+
+    // Installing another app rebuilds tabs; favicon stays attached in memory.
+    assert!(state.install("station-manifest://157"));
+    let tab = state
+        .tabs()
+        .iter()
+        .find(|t| t.id == gmail)
+        .expect("gmail still present");
+    assert_eq!(tab.page_favicon.as_deref(), Some(fav));
+
+    // Session document must never contain page-derived favicon URLs.
+    let doc = std::fs::read_to_string(&path).expect("session written");
+    assert!(!doc.contains("live-favicon.png"), "leaked favicon: {doc}");
+    assert!(!doc.contains("pageFavicon"), "leaked field: {doc}");
+    let _ = std::fs::remove_file(&path);
 }

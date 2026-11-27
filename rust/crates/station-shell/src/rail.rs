@@ -72,15 +72,8 @@ fn tab_row(tab: &AppTab, state: &ShellState, active: bool, p: Paint) -> El {
             s.select(&id);
         })
         .child(
-            crate::icons::avatar(
-                &tab.label,
-                &tab.id,
-                "",
-                28.0,
-                p,
-                state.icon_pixels(&tab.icon),
-            )
-            .key(format!("tab-icon-{}", tab.id)),
+            crate::icons::avatar(&tab.label, &tab.id, "", 28.0, p, state.tab_icon_pixels(tab))
+                .key(format!("tab-icon-{}", tab.id)),
         );
     if tab.kind == crate::state::TabKind::Web {
         row = row.on_secondary_press(move |s: &mut ShellState, _, _| {

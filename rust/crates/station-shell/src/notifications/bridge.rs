@@ -238,6 +238,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
   const META_SELECTOR = 'meta[name^=browserx-]';
   let sentMetas = null;
   let sentTitle = null;
+  let sentFavicon = null;
   const currentMetas = () => {
     const values = {};
     const metas = document.querySelectorAll(META_SELECTOR);
@@ -246,6 +247,20 @@ pub const INIT_SCRIPT: &str = r#"(() => {
       if (key) values[key] = meta.content;
     }
     return values;
+  };
+  const currentFavicon = () => {
+    if (!document.head) return '';
+    const links = document.head.querySelectorAll('link[rel]');
+    let fallback = '';
+    for (const link of links) {
+      const rel = String(link.getAttribute('rel') || '').toLowerCase().trim();
+      const tokens = rel.split(/\s+/);
+      const href = typeof link.href === 'string' ? link.href.trim() : '';
+      if (!href || (!href.startsWith('http://') && !href.startsWith('https://'))) continue;
+      if (tokens.includes('icon')) return href;
+      if (!fallback && tokens.includes('apple-touch-icon')) fallback = href;
+    }
+    return fallback;
   };
   const emitMetas = () => {
     const values = currentMetas();
@@ -260,13 +275,21 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     sentTitle = title;
     postPageMeta({ kind: 'title', title: title });
   };
+  const emitFavicon = () => {
+    const url = currentFavicon();
+    if (url === sentFavicon) return;
+    sentFavicon = url;
+    postPageMeta({ kind: 'favicon', url: url });
+  };
   const observePageMeta = () => {
     emitMetas();
     emitTitle();
+    emitFavicon();
     if (!document.head) return;
     new MutationObserver(() => {
       emitMetas();
       emitTitle();
+      emitFavicon();
     }).observe(document.head, {
       subtree: true, childList: true, attributes: true, characterData: true,
     });
@@ -408,6 +431,8 @@ pub const MAX_ICON_LEN: usize = 2048;
 pub const MAX_PAGE_TITLE_CHARS: usize = 256;
 /// The longest `browserx-badge` value, in chars. The TS values are counts or `"•"`.
 pub const MAX_BADGE_CHARS: usize = 32;
+/// The longest page favicon URL a tab may report, in chars.
+pub const MAX_FAVICON_URL_CHARS: usize = 2048;
 /// The longest single IPC message, in bytes (a 512 pt title plus a 4 KiB body as JSON escape
 /// the worst case sixfold; 32 KiB keeps arbitrary heads of hoarded text out of the frame).
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024;
@@ -448,8 +473,9 @@ pub fn sender_of(origin: &str, tabs: &[crate::state::AppTab]) -> Sender {
 
 /// A validated, attributed message from a page: already bounded, ready for the frame.
 ///
-/// Notifications go to the center; [`PageMessage::Title`] and [`PageMessage::Meta`] are the
-/// page's own presentation (slice 20), applied to its tab and never persisted.
+/// Notifications go to the center; [`PageMessage::Title`], [`PageMessage::Meta`], and
+/// [`PageMessage::Favicon`] are the page's own presentation, applied to its tab and never
+/// persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageMessage {
     /// `sendNotification(id, notification)`: a new or replacing notification from one app.
@@ -472,6 +498,9 @@ pub enum PageMessage {
         tab_id: String,
         badge: Option<String>,
     },
+    /// The page's `<link rel~="icon">` URL (`http://`/`https://`), or `None` to clear and fall
+    /// back to the manifest icon (Slice 31).
+    Favicon { tab_id: String, url: Option<String> },
     /// In-tab search result (`window.__stationFind`): 1-based `current` match and `total` count.
     Find {
         tab_id: String,
@@ -481,14 +510,14 @@ pub enum PageMessage {
 }
 
 /// The wire format: the Electron preload's `ipcRenderer.send` payloads plus the `kind` tag that
-/// picks the channel (`'new-notification'` / `'notification-close'`), and (slice 20) the page's
-/// own presentation: `title` (`document.title`, Electron's `page-title-updated` event) and
-/// `meta` (`browserx-*` metas, TS `page-bxmetas-updated`), plus (slice 27) `find` match counts.
+/// picks the channel (`'new-notification'` / `'notification-close'`), and (slice 20/31) the
+/// page's own presentation: `title`, `meta`, and `favicon`, plus (slice 27) `find` match counts.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireMessage {
     kind: String,
-    /// Notification id; absent for `title`/`meta`/`find` (a send/close without it is malformed).
+    /// Notification id; absent for `title`/`meta`/`favicon`/`find` (a send/close without it is
+    /// malformed).
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -499,6 +528,9 @@ struct WireMessage {
     /// `kind: "meta"`: every `browserx-*` meta value, keyed by the name without the prefix.
     #[serde(default)]
     metas: Option<HashMap<String, String>>,
+    /// `kind: "favicon"`: resolved `http://`/`https://` URL from `<link rel~="icon">`.
+    #[serde(default)]
+    url: Option<String>,
     /// `kind: "find"`: 1-based index of active match (0 when none).
     #[serde(default)]
     current: Option<u32>,
@@ -544,8 +576,9 @@ pub enum Refusal {
     TooLarge,
     /// Not from an installed app's web tab.
     UnknownSender,
-    /// Valid shape, but page text the tab's label/badge will not take: over its char cap, or
-    /// containing a control character. The current label/badge is left as it was.
+    /// Valid shape, but page text the tab's label/badge/favicon will not take: over its char
+    /// cap, non-fetchable scheme, or containing a control character. The current value is left as
+    /// it was.
     BadText,
 }
 
@@ -642,6 +675,19 @@ pub fn parse(sender: Sender, message: &str) -> Result<PageMessage, Refusal> {
                 .filter(|badge| !badge.is_empty());
             Ok(PageMessage::Meta { tab_id, badge })
         }
+        "favicon" => {
+            // Only fetchable `http://`/`https://` URLs are accepted; empty clears the override
+            // so the manifest icon returns; `javascript:`, `file:`, `data:` etc. are refused.
+            let cleaned = page_text(&wire.url.unwrap_or_default(), MAX_FAVICON_URL_CHARS)?;
+            let url = if cleaned.is_empty() {
+                None
+            } else if crate::icons::is_fetchable(&cleaned) {
+                Some(cleaned)
+            } else {
+                return Err(Refusal::BadText);
+            };
+            Ok(PageMessage::Favicon { tab_id, url })
+        }
         "find" => {
             let current = wire.current.unwrap_or(0);
             let total = wire.total.unwrap_or(0);
@@ -683,7 +729,7 @@ fn enqueue(message: PageMessage) -> Outcome {
         Ok(pending) => pending,
         Err(poisoned) => poisoned.into_inner(),
     };
-    // One slot per source: a replacement notification (same id), or the latest title/badge,
+    // One slot per source: a replacement notification (same id), or the latest title/badge/favicon,
     // replaces what that tab already queued instead of growing the queue.
     if let Some(slot) = pending
         .iter_mut()
@@ -700,7 +746,7 @@ fn enqueue(message: PageMessage) -> Outcome {
 }
 
 /// Whether two queued messages occupy the same slot: a notification id (send/close replace each
-/// other by id, as before) or the single title/badge slot per tab.
+/// other by id, as before) or the single title/badge/favicon/find slot per tab.
 fn same_slot(queued: &PageMessage, next: &PageMessage) -> bool {
     match (queued, next) {
         (
@@ -727,6 +773,7 @@ fn same_slot(queued: &PageMessage, next: &PageMessage) -> bool {
         ) => tab_id == other_tab && notification_id == other_id,
         (PageMessage::Title { tab_id, .. }, PageMessage::Title { tab_id: other, .. })
         | (PageMessage::Meta { tab_id, .. }, PageMessage::Meta { tab_id: other, .. })
+        | (PageMessage::Favicon { tab_id, .. }, PageMessage::Favicon { tab_id: other, .. })
         | (PageMessage::Find { tab_id, .. }, PageMessage::Find { tab_id: other, .. }) => {
             tab_id == other
         }
@@ -748,8 +795,9 @@ fn per_source(center: &NotificationCenter) -> HashMap<String, usize> {
 }
 
 /// Drains the accepted messages into `state`: notifications into the center (plus an OS
-/// notification balloon when not snoozed and within rate cap), page titles/badges onto their
-/// tabs (slice 20), and find counts (slice 27). Called by the frame's poll, on the main thread.
+/// notification balloon when not snoozed and within rate cap), page titles/badges/favicons onto
+/// their tabs (slices 20/31), and find counts (slice 27). Called by the frame's poll, on the
+/// main thread.
 #[cfg(test)]
 pub fn deliver_to(state: &mut ShellState) -> bool {
     deliver_to_at(state, crate::session::seconds())
@@ -840,6 +888,9 @@ pub fn deliver_to_with_notifier(
             }
             PageMessage::Meta { tab_id, badge } => {
                 changed |= state.set_page_badge(&tab_id, badge.as_deref());
+            }
+            PageMessage::Favicon { tab_id, url } => {
+                changed |= state.set_page_favicon(&tab_id, url.as_deref());
             }
             PageMessage::Find {
                 tab_id,
