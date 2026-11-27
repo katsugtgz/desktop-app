@@ -100,6 +100,9 @@ mod tests_quick_switch;
 #[cfg(test)]
 mod tests_os_notifications;
 
+#[cfg(test)]
+mod tests_custom_apps;
+
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
@@ -139,6 +142,7 @@ fn main() {
             ("notifications", |state| state.toggle_notifications()),
             ("about", |state| state.open_about()),
             ("quick-switch", |state| state.open_quick_switch()),
+            ("custom-app", |state| state.open_custom_app_form()),
         ],
         ..rune::AppSpec::new(
             "Station",

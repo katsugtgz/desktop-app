@@ -335,6 +335,32 @@ pub struct ShellState {
     quick_switch: crate::quick_switch::QuickSwitchState,
     /// Last polled host OS Do Not Disturb state (Slice 29, active under `Snooze::SyncWithOs`).
     os_dnd_active: bool,
+    /// Inline "+ Add custom app" draft while open in `App Store -> My custom apps` (Slice 32).
+    custom_app_draft: Option<CustomAppDraft>,
+}
+
+/// Draft fields for adding a user-defined custom web app in `App Store -> My custom apps`.
+#[derive(Debug, PartialEq)]
+pub struct CustomAppDraft {
+    pub name: TextEdit,
+    pub start_url: TextEdit,
+    pub scope: TextEdit,
+    pub icon_url: TextEdit,
+    pub theme_color: TextEdit,
+    pub error: Option<String>,
+}
+
+impl Default for CustomAppDraft {
+    fn default() -> Self {
+        Self {
+            name: TextEdit::new(""),
+            start_url: TextEdit::new(""),
+            scope: TextEdit::new(""),
+            icon_url: TextEdit::new(""),
+            theme_color: TextEdit::new("#2B5CE6"),
+            error: None,
+        }
+    }
 }
 
 /// The settings editor's draft for one installed application.
@@ -431,6 +457,7 @@ impl ShellState {
             ),
             quick_switch: crate::quick_switch::QuickSwitchState::default(),
             os_dnd_active: false,
+            custom_app_draft: None,
         };
         state.rebuild_tabs();
         state
@@ -1314,6 +1341,122 @@ impl ShellState {
 
     pub fn show_section(&mut self, section: StoreSection) {
         self.section = section;
+        if section != StoreSection::MyCustomApps {
+            self.custom_app_draft = None;
+        }
+    }
+
+    /// Open inline custom-app draft while editing in `App Store -> My custom apps`.
+    pub fn custom_app_draft(&self) -> Option<&CustomAppDraft> {
+        self.custom_app_draft.as_ref()
+    }
+
+    /// Mutable access to the open custom-app draft for Rune `text_input` fields.
+    pub fn custom_app_draft_mut(&mut self) -> Option<&mut CustomAppDraft> {
+        self.custom_app_draft.as_mut()
+    }
+
+    /// Opens the inline "+ Add custom app" form inside `App Store -> My custom apps`.
+    pub fn open_custom_app_form(&mut self) {
+        self.section = StoreSection::MyCustomApps;
+        self.search = TextEdit::new("");
+        self.results.clear();
+        self.custom_app_draft = Some(CustomAppDraft::default());
+    }
+
+    /// Closes the inline custom-app form, discarding unsaved input. True if it was open.
+    pub fn close_custom_app_form(&mut self) -> bool {
+        self.custom_app_draft.take().is_some()
+    }
+
+    /// Validates the open custom-app draft, saves it to the private-manifest store, refreshes
+    /// the App Store catalog, and installs the new app into the rail. On validation or disk
+    /// error the draft stays open with its `error` populated.
+    pub fn submit_custom_app_draft(&mut self) -> bool {
+        let Some(draft) = self.custom_app_draft.as_ref() else {
+            return false;
+        };
+        let recipe = match validate_custom_app_draft(draft) {
+            Ok(recipe) => recipe,
+            Err(why) => {
+                if let Some(d) = self.custom_app_draft.as_mut() {
+                    d.error = Some(why);
+                }
+                return false;
+            }
+        };
+        let created = match self.store.request_private_application(recipe) {
+            Ok(created) => created,
+            Err(why) => {
+                if let Some(d) = self.custom_app_draft.as_mut() {
+                    d.error = Some(why.to_string());
+                }
+                return false;
+            }
+        };
+        self.custom_app_draft = None;
+        self.refresh_store_catalog();
+        self.install(&created.bx_app_manifest_url)
+    }
+
+    /// Uninstalls every installed instance of a custom app manifest and deletes it from the
+    /// private-manifest store. Returns removed application ids so the caller closes their pages
+    /// via [`crate::webview::close_tab`].
+    pub fn delete_custom_app(&mut self, id: u64, manifest_url: &str) -> Vec<String> {
+        let mut removed: Vec<String> = self
+            .store
+            .installed_applications()
+            .values()
+            .filter(|app| app.manifest_url == manifest_url)
+            .map(|app| app.application_id.clone())
+            .collect();
+        removed.sort();
+        if let Err(why) = self.store.uninstall_all_for_manifest(manifest_url) {
+            eprintln!("station-shell: could not uninstall custom app {id}: {why}");
+            removed.clear();
+        }
+        for app_id in &removed {
+            if self.tab_menu.as_deref() == Some(app_id.as_str()) {
+                self.tab_menu = None;
+            }
+            self.zoom.remove(app_id);
+            self.favorites.retain(|fav| fav.application_id != *app_id);
+        }
+        if let Err(why) = self.store.delete_private_manifest(id) {
+            eprintln!("station-shell: could not delete custom app {id}: {why}");
+        }
+        self.refresh_store_catalog();
+        self.rebuild_tabs();
+        self.persist();
+        removed
+    }
+
+    /// Recomputes cached store lists (`private`, `custom`, `popular`, `categories`, `results`)
+    /// after adding or removing a private manifest.
+    fn refresh_store_catalog(&mut self) {
+        let private = self.store.private_manifests();
+        let popular = get_most_popular_apps(&private);
+        let grouped = get_applications_by_category(&private);
+        let categories = get_all_categories(&private)
+            .into_iter()
+            .filter_map(|category| {
+                let apps = grouped
+                    .iter()
+                    .find(|(name, _)| *name == category)
+                    .map(|(_, apps)| apps.clone())
+                    .unwrap_or_default();
+                (!apps.is_empty()).then_some((category, apps))
+            })
+            .collect();
+        let custom = private
+            .iter()
+            .map(manifest_to_minimal_application)
+            .collect();
+        self.private = private;
+        self.popular = popular;
+        self.categories = categories;
+        self.custom = custom;
+        self.refresh_search();
     }
 
     pub fn search(&self) -> &TextEdit {
@@ -2194,4 +2337,81 @@ fn trimmed(mut config: AppConfigEntry) -> AppConfigEntry {
     config.subdomain = cut(config.subdomain);
     config.custom_url = cut(config.custom_url);
     config
+}
+
+/// Validates a user-submitted custom app draft into a [`manifest_registry::NewPrivateApplication`].
+fn validate_custom_app_draft(
+    draft: &CustomAppDraft,
+) -> Result<manifest_registry::NewPrivateApplication, String> {
+    const MAX_NAME_CHARS: usize = 128;
+    const MAX_URL_CHARS: usize = 2048;
+
+    let name = draft.name.text.trim();
+    if name.is_empty() {
+        return Err("App name is required.".to_owned());
+    }
+    if name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
+        return Err("App name must be 128 characters or fewer without control chars.".to_owned());
+    }
+
+    let start_raw = draft.start_url.text.trim();
+    let parsed_start = parse_http_url(start_raw, MAX_URL_CHARS)
+        .ok_or_else(|| "Start URL must be a valid https:// or http:// URL.".to_owned())?;
+
+    let scope_raw = draft.scope.text.trim();
+    let scope = if scope_raw.is_empty() {
+        parsed_start.origin().ascii_serialization()
+    } else {
+        parse_http_url(scope_raw, MAX_URL_CHARS)
+            .ok_or_else(|| "Scope must be a valid https:// or http:// URL.".to_owned())?
+            .as_str()
+            .to_owned()
+    };
+
+    let icon_raw = draft.icon_url.text.trim();
+    let icon_url = if icon_raw.is_empty() {
+        String::new()
+    } else {
+        parse_http_url(icon_raw, MAX_URL_CHARS)
+            .ok_or_else(|| "Icon URL must be a valid https:// or http:// URL.".to_owned())?
+            .as_str()
+            .to_owned()
+    };
+
+    let color_raw = draft.theme_color.text.trim();
+    let theme_color = if color_raw.is_empty() {
+        "#2B5CE6".to_owned()
+    } else if is_hex_color(color_raw) {
+        color_raw.to_owned()
+    } else {
+        return Err("Theme color must be a hex color like #2B5CE6.".to_owned());
+    };
+
+    Ok(manifest_registry::NewPrivateApplication {
+        name: name.to_owned(),
+        theme_color,
+        icon_url,
+        start_url: parsed_start.as_str().to_owned(),
+        scope,
+    })
+}
+
+fn parse_http_url(raw: &str, max_chars: usize) -> Option<url::Url> {
+    if raw.is_empty() || raw.chars().count() > max_chars || raw.chars().any(char::is_control) {
+        return None;
+    }
+    let parsed = url::Url::parse(raw).ok()?;
+    let scheme = parsed.scheme();
+    if (scheme == "http" || scheme == "https") && parsed.host_str().is_some() {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn is_hex_color(raw: &str) -> bool {
+    let Some(hex) = raw.strip_prefix('#') else {
+        return false;
+    };
+    matches!(hex.len(), 3 | 6) && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }

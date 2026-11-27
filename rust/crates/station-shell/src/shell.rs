@@ -34,7 +34,10 @@ impl Paint {
 /// `Ctrl+K`/`Ctrl+T`, find, reload, back, forward, zoom, Settings, tab jump 1..9).
 pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
     if event.key == rune::Key::Escape {
-        return state.close_find() || state.close_tab_menu() || state.close_overlay();
+        return state.close_find()
+            || state.close_tab_menu()
+            || state.close_custom_app_form()
+            || state.close_overlay();
     }
     if event.is_command('k') || event.is_command('t') {
         if state.surface() == Surface::QuickSwitch {

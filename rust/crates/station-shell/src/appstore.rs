@@ -172,21 +172,259 @@ fn main(state: &ShellState, p: Paint) -> El {
                 }
             }
             StoreSection::MyCustomApps => {
-                let custom = state.custom();
-                if custom.is_empty() {
-                    area = area.child(
-                        text("No custom apps yet.")
-                            .key("store-custom-empty")
-                            .font(type_::BODY)
-                            .color(p.t.text_secondary),
-                    );
-                } else {
-                    area = area.child(grid(custom, state, p));
-                }
+                area = area.child(custom_apps_section(state, p));
             }
         }
     }
     area
+}
+
+fn custom_apps_section(state: &ShellState, p: Paint) -> El {
+    let mut section = col().key("store-custom-section").w_full().gap(space::S3);
+    if let Some(draft) = state.custom_app_draft() {
+        section = section.child(custom_app_form(draft, p));
+    } else {
+        section = section.child(
+            row().key("store-custom-actions").w_full().child(
+                el().key("store-custom-add")
+                    .role("button")
+                    .label("Add custom app")
+                    .focusable(true)
+                    .h(30.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(p.t.control_track)
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| state.open_custom_app_form())
+                    .child(
+                        text("+ Add custom app")
+                            .font(type_::LABEL)
+                            .color(p.t.text)
+                            .a11y_hidden(),
+                    ),
+            ),
+        );
+    }
+
+    let custom = state.custom();
+    if custom.is_empty() {
+        if state.custom_app_draft().is_none() {
+            section = section.child(
+                text("No custom apps yet.")
+                    .key("store-custom-empty")
+                    .font(type_::BODY)
+                    .color(p.t.text_secondary),
+            );
+        }
+    } else {
+        let mut list = col().key("store-custom-list").w_full().gap(space::S2);
+        for app in custom {
+            let delete_id = app.id.parse::<u64>().ok();
+            let manifest_url = app.bx_app_manifest_url.clone();
+            let app_name = app.name.clone();
+            let mut item = row()
+                .key(format!("store-custom-row-{}", app.id))
+                .w_full()
+                .gap(space::S3)
+                .center_y()
+                .child(tile(app, state, p));
+            if let Some(numeric_id) = delete_id {
+                item = item.child(
+                    el().key(format!("store-custom-delete-{}", app.id))
+                        .role("button")
+                        .label(format!("Delete {app_name}"))
+                        .focusable(true)
+                        .h(26.0)
+                        .px(space::S2)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(p.t.control_track)
+                        .hover(p.t.hover)
+                        .press(p.t.press)
+                        .on_press(move |state: &mut ShellState| {
+                            let removed = state.delete_custom_app(numeric_id, &manifest_url);
+                            for application_id in removed {
+                                crate::webview::close_tab(&application_id);
+                            }
+                        })
+                        .child(
+                            text("Delete")
+                                .font(type_::LABEL)
+                                .color(p.t.text_secondary)
+                                .a11y_hidden(),
+                        ),
+                );
+            }
+            list = list.child(item);
+        }
+        section = section.child(list);
+    }
+    section
+}
+
+fn custom_app_form(draft: &crate::state::CustomAppDraft, p: Paint) -> El {
+    let mut card = col()
+        .key("store-custom-form")
+        .w_full()
+        .max_w(560.0)
+        .padding(space::S3)
+        .gap(space::S2)
+        .radius(radius::MD)
+        .fill(p.t.card)
+        .border(1.0, p.t.card_border)
+        .child(
+            text("Add a custom web app")
+                .key("store-custom-form-title")
+                .font(type_::TITLE)
+                .color(p.t.text),
+        )
+        .child(custom_field(
+            "store-custom-name",
+            "App name",
+            "e.g. Acme Intranet",
+            &draft.name,
+            p,
+            |d| &mut d.name,
+        ))
+        .child(custom_field(
+            "store-custom-url",
+            "Start URL",
+            "https://intranet.acme.test",
+            &draft.start_url,
+            p,
+            |d| &mut d.start_url,
+        ))
+        .child(custom_field(
+            "store-custom-scope",
+            "Scope URL (optional — defaults to Start URL origin)",
+            "https://intranet.acme.test",
+            &draft.scope,
+            p,
+            |d| &mut d.scope,
+        ))
+        .child(custom_field(
+            "store-custom-icon",
+            "Icon URL (optional)",
+            "https://intranet.acme.test/favicon.png",
+            &draft.icon_url,
+            p,
+            |d| &mut d.icon_url,
+        ))
+        .child(custom_field(
+            "store-custom-color",
+            "Theme color (optional hex)",
+            "#2B5CE6",
+            &draft.theme_color,
+            p,
+            |d| &mut d.theme_color,
+        ));
+
+    if let Some(err) = draft.error.as_deref() {
+        card = card.child(
+            text(err.to_owned())
+                .key("store-custom-error")
+                .font(type_::LABEL)
+                .color(rune::color::hex("#EF5757").unwrap_or(p.t.text)),
+        );
+    }
+
+    card.child(
+        row()
+            .key("store-custom-form-actions")
+            .gap(space::S2)
+            .mt(space::S1)
+            .child(
+                el().key("store-custom-submit")
+                    .role("button")
+                    .label("Create & Install")
+                    .focusable(true)
+                    .h(28.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(tok::accent(0, p.dark))
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| {
+                        state.submit_custom_app_draft();
+                    })
+                    .child(
+                        text("Create & Install")
+                            .font(type_::LABEL)
+                            .color(rune::color::hex("#FFFFFF").unwrap_or(p.t.text))
+                            .a11y_hidden(),
+                    ),
+            )
+            .child(
+                el().key("store-custom-cancel")
+                    .role("button")
+                    .label("Cancel")
+                    .focusable(true)
+                    .h(28.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(p.t.control_track)
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| {
+                        state.close_custom_app_form();
+                    })
+                    .child(
+                        text("Cancel")
+                            .font(type_::LABEL)
+                            .color(p.t.text)
+                            .a11y_hidden(),
+                    ),
+            ),
+    )
+}
+
+fn custom_field(
+    key: &'static str,
+    label: &'static str,
+    placeholder: &'static str,
+    edit: &rune::TextEdit,
+    p: Paint,
+    field: fn(&mut crate::state::CustomAppDraft) -> &mut rune::TextEdit,
+) -> El {
+    col()
+        .w_full()
+        .gap(4.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(p.t.text_secondary)
+                .a11y_hidden(),
+        )
+        .child(
+            el().key(format!("{key}-box"))
+                .w_full()
+                .h(30.0)
+                .px(space::S2)
+                .center_y()
+                .radius(radius::SM)
+                .fill(p.t.bg)
+                .border(1.0, p.t.control_off)
+                .child(
+                    text_input(edit, type_::BODY)
+                        .key(key)
+                        .w_full()
+                        .single_line()
+                        .label(label)
+                        .placeholder(placeholder, p.t.text_secondary)
+                        .color(p.t.text)
+                        .on_edit(edit_access(move |state: &mut ShellState| {
+                            field(
+                                state
+                                    .custom_app_draft_mut()
+                                    .expect("custom app draft open while form renders"),
+                            )
+                        })),
+                ),
+        )
 }
 
 fn heading(state: &ShellState, p: Paint) -> El {
