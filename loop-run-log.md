@@ -81,3 +81,17 @@ Append one entry per run. Prune entries older than 30 days.
   - 30 (`ac2c089`): Local bounded crash reports (`crash.rs`, `<config>/station/crashes/`) + least-privilege WebView2 permission handler (`permissions.rs` via `wry::WebViewBuilder::with_permission_handler`).
 - Verification: `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` 0 warnings across all 13 crates; `cargo check -p station-shell --target x86_64-pc-windows-gnu` 0 warnings in `station-shell`; `cargo test --workspace` **587 passed / 0 failed** (+ 1 live Chrome OAuth test = **588 passing**); Node `scripts/rust-bridge-smoke.js` **17/17 PASS**; real Chromium `agent-browser` harness **ALL PASSED**; all 5 Rune UI surfaces (`store`, `settings`, `notifications`, `about`, `quick-switch`) rendered via `--snap` and visually inspected.
 - Outcome: fix-proposed (local branch `feat/full-rust-port`, no push/PR/merge and no Electron deletion yet — awaiting human review & Windows host validation).
+
+## 2026-11-26 — Full Rust port continuation (Slices 31–36)
+
+- Branch: `feat/full-rust-port` (commits `392feb9`, `cc8730b`, `d903278`, `f570575`, `4a83566`, plus Slice 36 Windows CI & doc sync).
+- Slices ported:
+  - 31 (`392feb9`): Chrome compatibility shims (`site_scripts.rs::CHROME_COMPAT_SCRIPT`) + live page `<link rel~="icon">` favicon observer (`notifications/bridge.rs::PageMessage::Favicon`, memory-only `AppTab::page_favicon` overriding rail icon).
+  - 32 (`cc8730b`): Native Custom / Private App creation & deletion UI in `App Store -> My custom apps` (`appstore.rs`, `state.rs`, `--scene custom-app`).
+  - 33 (`d903278`): Native 40 pt bottom Rune Downloads Bar (`downloads.rs::bar`, `--scene downloads`) + persisted custom downloads folder setting (`session-store` `downloadDir`, Settings → General inline editor).
+  - 34 (`f570575`): Real GitHub Releases update checker (`updater.rs`: SemVer 2.0 comparator, async `ureq` rustls worker, trusted release URL enforcement, local loopback HTTP tests) + persisted `includeBetaUpdates` channel toggle in About Station.
+  - 35 (`4a83566`): Windows minimize / close-to-tray lifecycle (`session-store` `minimizeToTray`, Windows-only Settings toggle, Rune `.keep_running()`, `webview::hide_all()`, `handle_close` hide vs quit, tray/instance reopen via `AppHandle::open()` + `focus()` + Win32 `SW_SHOW`).
+  - 36: Added `windows-2025` build/clippy/test job to `.github/workflows/rust.yml` + full workspace/Windows/Chrome/snapshot verification + doc sync.
+- Verification: `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` 0 warnings across all 13 crates; `cargo check -p station-shell --target x86_64-pc-windows-gnu` 0 warnings in `station-shell`; `cargo test --workspace` **605 passed / 0 failed / 1 ignored** (`station-shell` 278, `session-store` 41); Node `scripts/rust-bridge-smoke.js` **17/17 PASS**; real Google Chrome CDP JS verification (`INIT_SCRIPT`, `CHROME_COMPAT_SCRIPT`, favicon observer, all 7 site scripts) **PASS**; Rune `--snap` (lavapipe) rendered and visually inspected for `settings`, `about`, `custom-app`, and `downloads`.
+- Outcome: fix-proposed (local branch `feat/full-rust-port`, no push/PR/merge and no Electron deletion yet — awaiting human push approval & Windows host sign-off).
+

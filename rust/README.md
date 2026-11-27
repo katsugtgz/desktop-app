@@ -6,7 +6,7 @@ present and unaffected; this workspace is where the Rust port lives, one crate p
 ```bash
 cd rust
 cargo run -p station-shell          # the native shell (Windows; see requirements)
-cargo test --workspace              # every crate's tests (587 passing + 1 ignored live-Chrome OAuth test)
+cargo test --workspace              # every crate's tests (605 passing + 1 ignored live-Chrome OAuth test)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
@@ -34,6 +34,8 @@ cargo run -p station-shell -- --snap s.png --scene settings        # the Setting
 cargo run -p station-shell -- --snap n.png --scene notifications   # the notification panel
 cargo run -p station-shell -- --snap a.png --scene about           # About Station screen
 cargo run -p station-shell -- --snap q.png --scene quick-switch    # Bang Quick Switcher palette
+cargo run -p station-shell -- --snap c.png --scene custom-app      # Custom web app creation form
+cargo run -p station-shell -- --snap d.png --scene downloads       # Downloads bar over App Store
 ```
 
 `--snap` and the other headless flags come from Rune's `tooling` feature, which
@@ -53,7 +55,7 @@ store tile on an installed app uninstalls it, and Settings can also uninstall.
 
 | What | Where |
 | --- | --- |
-| Session (window placement, appearance, installed apps, dock, tabs, active app, per-app configuration) | `<config dir>/station/session.json` — `%APPDATA%\station\session.json` on Windows, `$XDG_CONFIG_HOME`/`~/.config` or `~/Library/Application Support` elsewhere |
+| Session (window placement, appearance, installed apps, dock, tabs, active app, per-app configuration, favorites, download folder, beta updates, minimize-to-tray) | `<config dir>/station/session.json` — `%APPDATA%\station\session.json` on Windows, `$XDG_CONFIG_HOME`/`~/.config` or `~/Library/Application Support` elsewhere |
 | Private (custom) app manifests | `<config dir>/BrowserX/private-manifests.json`, written by `manifest-registry` |
 
 A session's window size is stored up to 8192 pt (a 4K or ultrawide window is kept as it was), the
@@ -114,18 +116,26 @@ path: it logs `station-shell: no web view for <app>: …` and keeps running.
 
 ## Feature gaps
 
-What works and what does not, kept honest (updated through Slice 30, 2026-11-23):
+What works and what does not, kept honest (updated through Slice 36, 2026-11-26):
 
-- **App pages & per-site scripts**: installed apps open in a WebView2 child at their manifest start
-  URL. `site_scripts.rs` (slice 23) injects the 7 static IIFE per-site scripts covering all 14
-  Electron `JAVASCRIPT_INJECTIONS` legacy service IDs (Gmail, Slack, WhatsApp, Messenger,
-  Outlook/Office 365, Google Drive/Calendar/Cloud/Keep/Meet, Asana) alongside `INIT_SCRIPT`.
-- **Page title & badge**: a hosted page's `document.title` becomes the top bar and rail label (the
-  manifest name is the fallback, and clearing restores it), and its `meta[name=browserx-badge]` meta
-  draws a rail badge — a count (`999+` past the cap) or a dot for a text badge. Both are in memory
-  only, never in the session document. Not covered yet: favicons and per-tab history lists.
-- **Page environment & permissions**: a new page is created with the Electron session's user agent
-  (`packages/app/src/session.ts:67` — the Mac/Chrome 150 string), or with the manifest's
+- **App pages, Chrome shims & per-site scripts**: installed apps open in a WebView2 child at their
+  manifest start URL. `site_scripts.rs` (slices 23 & 31) injects non-clobbering Chrome compatibility
+  shims (`window.chrome.webstore`, `window.chrome.runtime` stub with scoped `lastError`, Google Docs
+  markers) plus the 7 static IIFE per-site scripts covering all 14 Electron `JAVASCRIPT_INJECTIONS`
+  legacy service IDs (Gmail, Slack, WhatsApp, Messenger, Outlook/Office 365, Google Drive/Calendar/
+  Cloud/Keep/Meet, Asana) alongside `INIT_SCRIPT`.
+- **Page title, badge & live favicon**: a hosted page's `document.title` becomes the top bar and
+  rail label (manifest name fallback), its `meta[name=browserx-badge]` draws a rail badge (`999+`
+  cap or dot), and its `<link rel~="icon">` / `apple-touch-icon` updates the rail icon live via
+  `PageMessage::Favicon` (slice 31; strict `http`/`https` validation, manifest icon & letter avatar
+  fallback). All three are in memory only, never persisted to `session.json`. Not covered yet:
+  per-tab history lists.
+- **App Store & Custom Apps**: built-in Rune App Store supports search, popular/category browsing,
+  install/uninstall, and **My custom apps** creation & deletion (slice 32: `+ Add custom app` inline
+  form with strict URL/scope/hex validation and per-row `Delete` uninstalling instances & detaching
+  webviews).
+- **Page environment, permissions & downloads**: a new page is created with the Electron session's
+  user agent (`packages/app/src/session.ts:67` — the Mac/Chrome 150 string), or with the manifest's
   `bx_override_user_agent` for that app; each app gets its own WebView2 user-data folder under
   `<session dir>/webview/app-<id>` (Electron's `persist:<applicationId>`), while apps with
   `bx_use_default_session` share `webview/default`. Both are fixed when the web view is built.
@@ -136,9 +146,11 @@ What works and what does not, kept honest (updated through Slice 30, 2026-11-23)
   capabilities (`Camera`, `Microphone`, `DisplayCapture`, `Geolocation`, `ClipboardRead`,
   `Autoplay`) to WebView2's native prompt. Not reproduced: per-request HTTP header interception
   (`accounts.google.com` UA override, localhost Referer stripping, CSP deletion), which wry does
-  not expose. **Downloads** (slice 22): page-suggested names are sanitized (including compound
-  Windows reserved names like `NUL.tar.gz`), written under OS Downloads without overwriting, capped
-  at 4 concurrent, and logged bounded; no download toaster UI.
+  not expose. **Downloads** (slices 22 & 33): page-suggested names are sanitized (including compound
+  Windows reserved names like `NUL.tar.gz`), written under the OS Downloads folder or the user's
+  custom folder (`Settings -> General -> Downloads`, persisted as `downloadDir`) without
+  overwriting, capped at 4 concurrent, and surfaced in a 40 pt bottom Rune downloads bar (`Open`,
+  `Folder`, `Dismiss`, `Clear all`) that shrinks `content` cleanly.
 - **Navigation, tab actions, in-tab search & Quick Switcher**:
   - Top bar includes Back/Fwd/Reload/Find/Star/Browser/`...`/Jump controls (`placeholder.rs`).
   - Right-clicking a rail app or pressing `...` opens the 40 pt Rune `tab_actions_bar` (Reload,
@@ -148,14 +160,18 @@ What works and what does not, kept honest (updated through Slice 30, 2026-11-23)
     `Ctrl/Cmd+,` (Settings), `Ctrl/Cmd+1..9` (rail jump), `Ctrl/Cmd+R`/`F5` (reload),
     `Ctrl/Cmd+[`/`]` (back/forward), `Ctrl/Cmd+0`/`=`/`+`/`-` (per-tab zoom).
   - **In-tab search** (slice 27, `find.rs`): 40 pt Rune bar above `content`, literal DOM search via
-    JSON-escaped `window.__stationFind` / `__stationFindClear` (no `RegExp` on user text), match
-    counts over IPC (`kind: "find"`). Verified live in Chrome via `agent-browser`.
+    JSON-escaped `window.__stationFind` / `__stationFindClear` (no `RegExp` on user input), match
+    counts over IPC (`kind: "find"`). Verified live in Chrome.
   - **Bang Quick Switcher & Favorites** (slice 28, `quick_switch.rs`): searches pinned favorites
     (persisted in `session-store` v1), installed tabs ranked by `activity::frecency`, shell actions,
     and App Store quick-install matches.
-- **About Station, fatal dialogs & crash reporting**:
-  - **About Station** (slice 24, `about.rs`): native Rune screen over `about-window`, reachable from
-    Settings → General and Quick Switcher, with v1 "Check for updates" opening GitHub Releases.
+- **About Station, GitHub Releases updater, fatal dialogs & crash reporting**:
+  - **About Station & Updates** (slices 24 & 34, `about.rs`, `updater.rs`): native Rune screen over
+    `about-window`, reachable from Settings → General and Quick Switcher, with an asynchronous
+    GitHub Releases update checker (SemVer 2.0 comparison, 512 KiB / 10 s `ureq` rustls fetch,
+    trusted `https://github.com/katsugtgz/desktop-app/releases/` URL enforcement, `Download release`
+    button, and persisted `Include beta releases` switch). Full in-app staged binary replacement
+    remains product-gated.
   - **Fatal dialogs & crash reports** (slices 24 & 30, `dialogs.rs`, `crash.rs`): panic hook writes
     bounded (8 KiB) secret-free reports to `<config dir>/station/crashes/` (pruned at 20 files),
     and `catch_unwind` around `app.run()` shows a Win32 `MessageBoxW` (stderr fallback elsewhere).
@@ -171,17 +187,20 @@ What works and what does not, kept honest (updated through Slice 30, 2026-11-23)
   polls `SHQueryUserNotificationState` every 5 s to mirror host Focus Assist / Do Not Disturb.
   (Win32 balloon appearance and live `SHQueryUserNotificationState` readings are cross-typechecked
   for Windows GNU and unit-tested via fakes; visual verification requires a real Windows host.)
-- **Tray & launch at login**: Windows notification-area icon (`tray.rs`, Open/Exit) and unelevated
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Station` toggle (`autolaunch.rs`, Settings →
-  General). Closing the window quits; minimize-to-tray is not ported.
+- **Tray, minimize-to-tray & launch at login**: Windows notification-area icon (`tray.rs`,
+  Open/Exit), unelevated `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Station` toggle
+  (`autolaunch.rs`, Settings → General), and Windows close-to-tray support (slice 35: persisted
+  `minimizeToTray` switch in Settings → General, Rune `.keep_running()`, `webview::hide_all()`
+  keeping pages alive until tray Open or single-instance wake reopens the window).
 - **Identity / Google OAuth Option B** (slices 17 & 25, `oauth.rs`): RFC 7636 PKCE (`S256`) +
   ephemeral loopback HTTP callback (`127.0.0.1:0`, constant-length state check, strict CSP static
   HTML, zero tokens stored on disk), configured via `GOOGLE_CLIENT_ID` (optional
   `GOOGLE_CLIENT_SECRET`), with Settings Accounts sign-in / cancel / remove. Verified end-to-end
   against real Chrome (`oauth::tests::live_chrome_agent_browser_oauth_callback_verify`); a live
   round-trip against Google's production endpoint requires a human-registered Desktop OAuth client.
-- **Packaging & remaining product decisions**: `rust/packaging/installer.nsi` (per-user HKCU NSIS
-  installer with WebView2 bootstrapper and `station://` registration) is built and locally smoked;
-  clean-VM verification, code signing identity, and product decisions on Chrome extensions, password
-  managers, SDK runtime apps, and full staged auto-updater remain human-gated before Electron
-  deletion (`P6–P8`).
+- **CI, packaging & remaining product decisions**: `.github/workflows/rust.yml` runs build/clippy/test
+  on both `ubuntu-latest` and `windows-2025` (slice 36); `rust/packaging/installer.nsi` (per-user
+  HKCU NSIS installer with WebView2 bootstrapper and `station://` registration) is built and locally
+  smoked; clean-VM verification, code signing identity, and product decisions on Chrome extensions,
+  password managers, SDK runtime apps, and full staged auto-updater remain human-gated before
+  Electron deletion (`P6–P8`).

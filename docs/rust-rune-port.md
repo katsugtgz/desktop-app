@@ -1049,6 +1049,54 @@ bullets that follow.
     `Shell_NotifyIconW` balloon / `SHQueryUserNotificationState` live OS behavior, live Google
     account OAuth sign-in, and clean-VM NSIS installer sign-off prior to P6–P8 Electron deletion.
 
+## Slices 31–36 (2026-11-26, `feat/full-rust-port`)
+
+- **Slice 31 (`392feb9`) — Chrome compatibility shims & live page favicon bridge**: Added
+  `CHROME_COMPAT_SCRIPT` to `site_scripts.rs` (non-clobbering `window.chrome.webstore = true`,
+  `window.chrome.runtime` stub with scoped `lastError` in `try/finally`, and Google Docs extension
+  markers) and extended `notifications/bridge.rs` with a `<link rel~="icon">` / `apple-touch-icon`
+  observer (zero new window globals) feeding memory-only `AppTab::page_favicon` (strict
+  `http`/`https` + control-char validation, slot dedupe, manifest/letter-avatar fallback, never
+  persisted to `session.json`).
+- **Slice 32 (`cc8730b`) — Native Custom / Private Apps UI**: Added `+ Add custom app` inline
+  creation form (`appstore.rs`, `state.rs::CustomAppDraft`, `--scene custom-app`) with strict
+  `http`/`https` URL validation, automatic origin `scope` derivation, `#RGB`/`#RRGGBB` hex checks,
+  and per-row `Delete` uninstalling all instances of the manifest and detaching their webviews.
+- **Slice 33 (`d903278`) — Native Downloads Bar UI & custom download folder**: Added 40 pt bottom
+  Rune downloads bar (`downloads.rs::bar`, `--scene downloads`, `Open`/`Folder`/`Dismiss`/`Clear all`,
+  shrinking `content` cleanly), Win32 `ShellExecuteW` / POSIX `xdg-open` local opener seam, and
+  persisted additive `downloadDir` in `session-store` v1 with Settings → General inline editor
+  (absolute-path, length ≤ 2 048, and control-char validation + Reset).
+- **Slice 34 (`f570575`) — Real GitHub Releases update checker & beta channel**: Added `updater.rs`
+  with SemVer 2.0 parser/comparator, async `ureq` rustls worker (512 KiB / 10 s cap, `User-Agent`
+  header, local loopback HTTP tests), draft/beta filtering, strict
+  `https://github.com/katsugtgz/desktop-app/releases/` URL validation, and persisted additive
+  `includeBetaUpdates` in `session-store` v1 + About Station UI (`Download release` +
+  `Include beta releases` switch).
+- **Slice 35 (`4a83566`) — Windows minimize / close-to-tray**: Added additive `minimizeToTray` in
+  `session-store` v1, Windows-only Settings → General switch (`settings-minimize-to-tray`),
+  `webview::hide_all()`, Rune `.keep_running()` on Windows, testable `main::handle_close` (hiding
+  pages without detaching when `tray_supported && minimize_to_tray && !quitting`, else running full
+  `shutdown_shell` + `tx.quit()`), and tray Open + single-instance wake reopening via
+  `AppHandle::open()` + `focus()` + Win32 `SW_SHOW`.
+- **Slice 36 — Windows CI job & doc sync**: Added a `windows-2025` build/clippy/test job to
+  `.github/workflows/rust.yml`.
+- **Verified on Linux + Windows cross-target + real Chrome + lavapipe `--snap` (2026-11-26)**:
+  - `cargo fmt --all --check`: clean.
+  - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings across all 13 crates.
+  - `cargo check -p station-shell --target x86_64-pc-windows-gnu`: 0 warnings in `station-shell`.
+  - `cargo test --workspace`: **605 passed, 0 failed, 1 ignored** (`station-shell` 278,
+    `session-store` 41).
+  - `node scripts/rust-bridge-smoke.js`: **17/17 PASS**.
+  - Real Google Chrome CDP JS verification (`INIT_SCRIPT`, `CHROME_COMPAT_SCRIPT`, favicon observer,
+    all 7 per-site scripts): **PASS**.
+  - Rune `--snap` (lavapipe): `settings`, `about`, `custom-app`, and `downloads` rendered and
+    visually inspected.
+  - **Still requires a real Windows host**: live WebView2 rendering/composition, Win32
+    `MessageBoxW` / `Shell_NotifyIconW` / `SHQueryUserNotificationState` / `ShellExecuteW` /
+    close-to-tray hide-and-reopen runtime, live Google OAuth sign-in, and clean-VM NSIS installer
+    sign-off before P6–P8 Electron deletion.
+
 ## Unverified
 
 - **Z-order is only partly observed.** A `PrintWindow` capture of the running window showed the rail
