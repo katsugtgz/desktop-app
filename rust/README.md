@@ -1,7 +1,8 @@
 # Station's Rust workspace
 
-The native shell and the services behind it. The Electron app in the repository root is still
-present and unaffected; this workspace is where the Rust port lives, one crate per concern.
+The native shell and the services behind it. The legacy Electron/TypeScript tree (`packages/`) has
+been retired into git history (P6–P8); this workspace is the full Station desktop application, one
+crate per concern.
 
 ```bash
 cd rust

@@ -339,6 +339,23 @@ station-shell`; `makensis` installer; clean-VM install; `rg -n "yarn|npm |electr
 shows only intentional history.
 **Rollback:** `port/p8-done` (the tag *is* the last Electron-containing commit).
 
+**Executed (2026-11-26, user-approved on `feat/full-rust-port`):**
+- P6 removed `packages/app/`, P7 removed `packages/appstore/` and `packages/sdk/`, and P8 removed
+  `dev_utils/`, `scripts/`, `.storybook/`, `@types/`, `.yarn/`, `package.json`, `yarn.lock`,
+  TS/ESLint/TSLint/Prettier/CodeClimate configs, and `.github/workflows/{tests,release}.yml`.
+- Last Electron-containing commit on `feat/full-rust-port`: `d393a3c`.
+- `.env.development`, `.env.example`, and `.env.production` were left untouched per `loop-constraints.md`.
+- `.github/workflows/release-candidate.yml` keeps only the native Rust `package-windows` NSIS job
+  (`tags: ['v*']` + `workflow_dispatch`); `.github/workflows/rust.yml` runs both `ubuntu-latest`
+  and `windows-2025` build/clippy/test on pushes to `main` and all pull requests.
+- `AGENTS.md` and `README.md` updated to Cargo workspace commands.
+- Product decisions recorded by retiring Electron now: Chrome extensions, 1Password/Bitwarden
+  provider integrations, legacy JS SDK runtime apps, and Electron onboarding/orgs/os-bar are
+  dropped from the native Rust app (web apps still run in WebView2 with per-app profiles, Chrome
+  compat shims, and WebView2's built-in password autofill); updates use the native GitHub Releases
+  checker + beta channel (`updater.rs`) with manual browser download until/unless a signed staged
+  updater is later prioritized.
+
 ---
 
 ## 4. The honest schedule

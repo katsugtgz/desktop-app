@@ -1,178 +1,69 @@
 # Station Desktop Application
 
-## Table of Contents
-- [Installation](#installation)
-  - [Requirements](#requirements)
-  - [MacOS](#macos)
-  - [Windows](#windows)
-  - [Ubuntu](#ubuntu)
-  - [CentOS / Amazon Linux 2](#centos-or-amazon-linux-2)
-- [Run](#run)
-- [DevTools](#devtools)
-  - [Toggle Chrome DevTools](#toggle-chrome-devtools)
-  - [Library DevTools](#library-devtools)
-    - [Redux DevTools](#redux-devtools)
-  - [Main proces debugging](#main-proces-debugging)
-  - [Debugging in VSCode](#debugging-in-vscode)
-- [Useful env variables for dev](#useful-env-variables-for-dev)
-- [Migrations](#migrations)
-  - [Inspect DB](#inspect-db)
-- [Packaging](#packaging)
-  - [Code signing](#code-signing)
-- [Development tools](#development-tools)
-- [Releases](#releases)
-- [Select documentation topics](#docs)
+Station is a native Rust desktop workspace browser built with **Rune** (native GPU shell UI) and **WebView2** (`wry`, Windows 10/11) under [`rust/`](rust/).
 
-## Installation
+> The legacy Electron/TypeScript implementation (`packages/`) has been retired into git history; see [`docs/full-rust-port-program.md`](docs/full-rust-port-program.md) and [`docs/rust-rune-port.md`](docs/rust-rune-port.md) for the port architecture and product decisions.
 
-### Requirements
-* node >= `18.x`
-* yarn >= `1.19.x`
+## Requirements
+
+- **Rust stable toolchain** (see [`rust/rust-toolchain.toml`](rust/rust-toolchain.toml) or install via [rustup](https://rustup.rs))
+- **Windows 10/11 (x64, MSVC)** for running the desktop shell with live WebView2 pages (WebView2 Evergreen runtime is preinstalled on Windows 10/11 via Microsoft Edge)
+- Linux/macOS hosts can build, lint, test all 13 workspace crates, render headless Rune snapshots (`--snap`), and cross-typecheck Windows paths via `x86_64-pc-windows-gnu`
+
+## Build, Run & Test
 
 ```bash
-$ git clone https://github.com/getstation/desktop-app.git
-$ cd desktop-app
-$ yarn
+cd rust
+
+# Run the native shell (Windows)
+cargo run -p station-shell
+
+# Build a release binary
+cargo build --release -p station-shell
+
+# Format, lint, and test all 13 workspace crates
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-### MacOS
-
-No additional requirements.
-
-### Windows
-
-Install `node-gyp` dependencies
+### Headless UI Snapshots
 
 ```bash
-$ npm --add-python-to-path install --global --production windows-build-tools
+cd rust
+cargo run -p station-shell -- --snap shot.png
+cargo run -p station-shell -- --snap settings.png --scene settings
+cargo run -p station-shell -- --snap notifications.png --scene notifications
+cargo run -p station-shell -- --snap about.png --scene about
+cargo run -p station-shell -- --snap quick-switch.png --scene quick-switch
+cargo run -p station-shell -- --snap custom-app.png --scene custom-app
+cargo run -p station-shell -- --snap downloads.png --scene downloads
 ```
 
-### Ubuntu
+## Windows Packaging (NSIS)
 
-```bash
-$ sudo apt install graphicsmagick icnsutils libxtst-dev libx11-dev libxrender-dev libxkbfile-dev libgconf-2-4
+Build the per-user NSIS installer (`release/station-shell-setup-<VERSION>.exe`) after building the release shell and staging the Microsoft Edge WebView2 bootstrapper at `rust/packaging/dist/MicrosoftEdgeWebview2Setup.exe`:
+
+```powershell
+cargo build --release -p station-shell --manifest-path rust/Cargo.toml
+makensis /DVERSION=0.1.0 rust/packaging/installer.nsi
 ```
 
-### CentOS or Amazon Linux 2
+See [`.github/workflows/release-candidate.yml`](.github/workflows/release-candidate.yml) for the automated `windows-2025` build and optional Authenticode signing flow (`STATION_SIGNING_PFX_BASE64` / `STATION_SIGNING_PFX_PASSWORD`).
 
-CentOS 9 is required.
+## Configuration & Data
 
-```bash
-$ sudo yum install clang dbus-devel gtk3-devel libnotify-devel xorg-x11-server-utils libcap-devel \
-                   cups-devel libXtst-devel alsa-lib-devel libXrandr-devel nss-devel
-```
+| Item | Location / Env |
+| --- | --- |
+| Session document (`version: 1`, atomic writes) | `%APPDATA%\station\session.json` (Windows), `$XDG_CONFIG_HOME/station/session.json` (Linux), `~/Library/Application Support/station/session.json` (macOS); override with `STATION_SESSION_PATH` |
+| Private / custom app manifests | `<config dir>/BrowserX/private-manifests.json` |
+| Crash reports (8 KiB cap, 20 newest kept) | `<config dir>/station/crashes/` |
+| Google OAuth Option B (PKCE + loopback) | Set `GOOGLE_CLIENT_ID` (and optional `GOOGLE_CLIENT_SECRET`) in the environment |
 
-> See [dotenv](#dotenv) for further configuration.
+## Documentation
 
-## Run
-```bash
-yarn run dev
-```
-
-### Natives modules errors
-
-If for any reason you have some error with binding module you could run `npm run rebuild-all-native` to check if you still have the problem
-
-## DevTools
-
-### Toggle Chrome DevTools
-
-- MacOS: <kbd>Cmd</kbd> <kbd>Alt</kbd> <kbd>I</kbd> or <kbd>F12</kbd>
-- Linux: <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>I</kbd> or <kbd>F12</kbd>
-- Windows: <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>I</kbd> or <kbd>F12</kbd>
-
-*See [electron-debug](https://github.com/sindresorhus/electron-debug) for more information.*
-
-### Library DevTools
-- [React DevTools](https://github.com/facebook/react-devtools) is available in Chrome DevTools
-- [Apollo Client DevTools](https://github.com/apollographql/apollo-client-devtools) is available in Chrome DevTools
-- [Redux DevTools](https://github.com/zalmoxisus/redux-devtools-extension) see below
-
-#### Redux Devtools
-In order to see redux transactions and state,
-install [Redux DevTools](https://github.com/gaearon/redux-devtools)
-(or the [browser extension](https://github.com/zalmoxisus/redux-devtools-extension))
-and click on `Open Remote DevTools`. Make sure `Use (custom) local server` on `localhost:8000` is activated in the settings.
-
-### Main proces debugging
-To inspect the main process, connect Chrome by visiting `chrome://inspect` and selecting to inspect the launched Electron app.
-
-## Useful env variables for dev
-- `STATION_NO_WEBVIEWS` if exists, webviews are not loaded
-- `STATION_REDUX_LOGGER` if exists, will enable redux-logger in renderer
-- `STATION_AUTOUPDATER_MOCK_SCENARIO` set the scenario for the mock of `AutoUpdater` module:
-  - `available` (default), mock an update is available and downloaded
-  - `not-available` mock an update is not available
-- `OVERRIDE_USER_DATA_PATH` override `userData` path (example: `OVERRIDE_USER_DATA_PATH="Station Canary" yarn run dev`)
-- `STATION_CHECK_INACTIVE_TAB_EVERY_MS` override the interval period between each check for inactive tabs
-- `STATION_WAIT_MS_BEFORE_KILL_TAB` override the time to wait before considering a tab is inactive and killing it
-- `STATION_QUICK_TRANSITIONS` all transitions are quick (used to test changing colors)
-- `STATION_REACT_PERF` add the react-addons-perf for react perf debugging
-- `STATION_NO_CHECK_FOR_UPDATE` if exists, the app will not check for update
-- `DEBUG=service:*` Will print debug info of Service framework on all processes
-- `STATION_SHOW_REQUIRE_TIME` if exists, the app will display the execution time of requiring modules upon quit
-  - ~~Main: timers shown upon quit~~ (disabled for now)
-  - ~~Renderer: to show timers, execute this in a console: `require('@getstation/time-require').default()`~~  (disabled for now)
-- `STATION_DISABLE_ECX` if exists, `electron-chrome-extension` will not be loaded
-
-## Migrations
-
-Databases migrations are using [umzug](https://github.com/sequelize/umzug) and [umzug-cli](https://github.com/marcbachmann/umzug-cli).
-
-To test migrations manually:
-```bash
-// Apply migrations
-$ yarn run database migrations up
-// Revert last applied migration
-$ yarn run database migrations down
-```
-
-### Inspect DB
-Install [TablePlus](https://tableplus.io/) and create a new SQLite connection with the database file located at `~/Library/Application\ Support/Station\ Dev/db/station.db`
-
-## Manual Packaging
-
-To package apps for the local platform:
-
-```bash
-$ yarn run build
-```
-
-#### Code signing
-The application will be automatically signed by the CI on the `release` branch
-
-## Development tools
-
-Here is a list of tools used during the development process. Consider adding the corresponding plugins to your IDE.
-
-- [Editorconfig](http://editorconfig.org/#download)
-- [ESLint](http://eslint.org/docs/user-guide/integrations#editors)
-- [TSLint](https://github.com/palantir/tslint)
-
-WebStorm and VSCode should be correctly configured by default.
-
-## Workspace management (TODO)
-This repository should be used as a proper monorepo. Packages that should be impacted:
-- appstore (already in this repo but not handled by any monorepo tool yet)
-- @getstation/sdk
-- @getstation/theme
-
-## Releases
-
-1. [Draft a new release](https://github.com/getstation/desktop-app/releases/new) tagged with the desired version
-2. Apply your changes on [`release`](https://github.com/getstation/desktop-app/tree/release) branch
-3. On `release` branch, bump the version with `yarn version` to the corresponding version number
-4. Let the CI build artifacts for each platform
-5. Publish the draft
-
-Note: you can remove artifacts and push changes over the same draft
-
-## Docs
-
-- [Services](packages/app/src/services/README.md)
-- [Score Engine](packages/app/src/lib/score-engine/README.md)
-- [Bang Lifecyle](packages/app/src/bang/README.md)
-- [Persistence](docs/persistence.md)
-- [Webpack](docs/webpack.md)
-- [Test Auto-Update](packages/app/test/auto-update/how_to_test.md)
-- [Local GraphQL](packages/app/src/graphql/README.md)
+- [`rust/README.md`](rust/README.md) — workspace crates, vendored Rune patches, and feature status
+- [`docs/rust-rune-port.md`](docs/rust-rune-port.md) — shell architecture ADR, robustness limits, and slice log
+- [`docs/full-rust-port-program.md`](docs/full-rust-port-program.md) — feature ledger and Electron retirement program
+- [`docs/oauth-config-options.md`](docs/oauth-config-options.md) — Google OAuth Option B design
+- [`docs/rust-packaging-plan.md`](docs/rust-packaging-plan.md) — NSIS installer contract
