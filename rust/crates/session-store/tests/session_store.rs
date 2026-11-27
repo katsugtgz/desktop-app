@@ -95,6 +95,7 @@ fn full_state() -> SessionState {
         }],
         download_dir: Some("/tmp/station-downloads".to_owned()),
         include_beta_updates: true,
+        minimize_to_tray: true,
     }
 }
 
@@ -1066,4 +1067,26 @@ fn include_beta_updates_defaults_false_and_round_trips_as_camel_case() {
 
     let loaded = store.load().expect("reload includeBetaUpdates");
     assert!(loaded.include_beta_updates);
+}
+
+#[test]
+fn minimize_to_tray_defaults_false_and_round_trips_as_camel_case() {
+    let dir = TempDir::new("minimize-to-tray");
+    let store = dir.store();
+
+    let default_state = store.load().expect("default load");
+    assert!(!default_state.minimize_to_tray);
+
+    let enabled = SessionState {
+        minimize_to_tray: true,
+        ..SessionState::default()
+    };
+    store.save(&enabled).expect("save minimizeToTray");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&read_bytes(&dir.path().join("session.json"))).expect("json");
+    assert_eq!(doc["minimizeToTray"], true);
+    assert_eq!(doc["version"], FORMAT_VERSION);
+
+    let loaded = store.load().expect("reload minimizeToTray");
+    assert!(loaded.minimize_to_tray);
 }

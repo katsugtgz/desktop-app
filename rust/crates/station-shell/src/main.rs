@@ -107,6 +107,46 @@ mod tests_custom_apps;
 #[cfg(test)]
 mod tests_updater;
 
+/// Outcome of a main-window close event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    /// Window hid to the Windows system tray; WebView2 pages are hidden, not closed.
+    HiddenToTray,
+    /// Full teardown ran and the event loop was asked to exit.
+    Quit,
+}
+
+/// Full graceful teardown: persist session, tear down OS notifications, detach WebView2 children,
+/// and remove the single-instance lock/socket. Idempotent across `on_close` and `on_quit`.
+pub(crate) fn shutdown_shell(state: &mut state::ShellState) {
+    state.save();
+    notifications::os::shutdown();
+    webview::close_all();
+    instance::shutdown();
+}
+
+/// Decides whether closing the window hides Station to the Windows system tray or quits the app.
+///
+/// Rune skips `on_quit` when `on_close` calls `tx.quit()`, so the quit branch runs
+/// [`shutdown_shell`] before exiting. The hide-to-tray branch keeps pages alive and hides the
+/// visible WebView2 child without setting the host's closed flag.
+pub(crate) fn handle_close(
+    state: &mut state::ShellState,
+    tx: &mut rune::Tx,
+    tray_supported: bool,
+    quitting: bool,
+) -> CloseAction {
+    if tray_supported && state.minimize_to_tray() && !quitting {
+        state.save();
+        webview::hide_all();
+        CloseAction::HiddenToTray
+    } else {
+        shutdown_shell(state);
+        tx.quit();
+        CloseAction::Quit
+    }
+}
+
 fn main() {
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
@@ -163,21 +203,22 @@ fn main() {
         webview::window_created(handle);
     })
     .on_frame_drawn(webview::after_frame)
-    .on_close(|state, _| {
-        state.save();
-        notifications::os::shutdown();
-        webview::close_all();
-        instance::shutdown();
+    .on_close(|state, tx| {
+        handle_close(state, tx, tray::supported(), rune::quitting());
     })
     .on_quit(|state, _| {
-        state.save();
-        notifications::os::shutdown();
-        webview::close_all();
-        instance::shutdown();
+        shutdown_shell(state);
     });
 
-    // The notification-area icon runs on Rune's own tray thread; keep the Tray alive for the
-    // app's whole life (dropping it removes the icon). Windows only, like the icon asset.
+    // On Windows, keep the event loop alive when `minimize_to_tray` hides the window; when
+    // `minimize_to_tray` is off, `handle_close` calls `tx.quit()` so closing still exits.
+    #[cfg(target_os = "windows")]
+    let app = app.keep_running();
+
+    // Remember the AppHandle so single-instance wakes can reopen a tray-hidden window, and keep
+    // the notification-area Tray alive for the app's whole life (dropping it removes the icon).
+    #[cfg(target_os = "windows")]
+    webview::remember_app_handle(app.handle());
     #[cfg(target_os = "windows")]
     let _tray = tray::start(app.handle());
 

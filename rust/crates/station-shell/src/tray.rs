@@ -80,6 +80,11 @@ pub(crate) fn command_for(event: &rune::TrayEvent) -> Option<Command> {
     }
 }
 
+/// True on platforms where Station creates a notification-area tray icon (Windows).
+pub fn supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// The icon's side, following the notification area's small-icon metric at the current DPI.
 #[cfg(target_os = "windows")]
 fn icon_size() -> u32 {
@@ -111,7 +116,12 @@ pub fn start(handle: rune::AppHandle<ShellState>) -> Option<rune::Tray> {
             return;
         };
         match command {
-            Command::Open => handle.focus(),
+            Command::Open => {
+                // `open()` reveals the window when hidden to the tray (`keep_running`),
+                // then `focus()` restores/brings it forward.
+                handle.open();
+                handle.focus();
+            }
             Command::Quit => handle.quit(),
         }
     }) {

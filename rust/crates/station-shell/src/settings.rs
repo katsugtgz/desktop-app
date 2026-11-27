@@ -128,6 +128,9 @@ fn general(state: &ShellState, p: Paint) -> El {
             p,
         ));
     }
+    if let Some(row) = minimize_to_tray_row(state, p, crate::tray::supported()) {
+        rows.push(row);
+    }
     rows.push(downloads_folder_row(state, p));
     if let Some(editor) = downloads_folder_editor(state, p) {
         rows.push(editor);
@@ -410,6 +413,56 @@ fn start_at_login_row(state: &ShellState, p: Paint, supported: bool) -> Option<E
             .child(
                 text(if model.on { "On" } else { "Off" })
                     .key("settings-start-at-login-value")
+                    .font(type_::MONO_CAPTION)
+                    .color(p.t.text_secondary),
+            ),
+    )
+}
+
+/// The minimize-to-tray row's testable content: present only where the platform has a tray.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MinimizeToTrayRow {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub on: bool,
+}
+
+/// Pure model for the "Keep Station in the tray when closing the window" switch.
+pub(crate) fn minimize_to_tray_model(
+    state: &ShellState,
+    supported: bool,
+) -> Option<MinimizeToTrayRow> {
+    supported.then_some(MinimizeToTrayRow {
+        key: "settings-minimize-to-tray",
+        label: "Keep Station in the tray when closing the window",
+        on: state.minimize_to_tray(),
+    })
+}
+
+fn minimize_to_tray_row(state: &ShellState, p: Paint, supported: bool) -> Option<El> {
+    let model = minimize_to_tray_model(state, supported)?;
+    Some(
+        row()
+            .key(model.key)
+            .role("switch")
+            .label(model.label)
+            .checked(model.on)
+            .h(36.0)
+            .px(space::S3)
+            .center_y()
+            .justify_between()
+            .hover(p.t.hover)
+            .press(p.t.press)
+            .on_press(|state: &mut ShellState| state.toggle_minimize_to_tray())
+            .child(
+                text(model.label)
+                    .font(type_::BODY)
+                    .color(p.t.text)
+                    .a11y_hidden(),
+            )
+            .child(
+                text(if model.on { "On" } else { "Off" })
+                    .key("settings-minimize-to-tray-value")
                     .font(type_::MONO_CAPTION)
                     .color(p.t.text_secondary),
             ),

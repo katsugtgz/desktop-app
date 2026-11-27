@@ -1007,6 +1007,18 @@ pub fn close_tab(tab_id: &str) {
     });
 }
 
+/// Hides whichever page is currently visible without detaching any page or closing the host.
+/// Used when closing the main window hides Station to the Windows system tray (`minimize_to_tray`),
+/// so pages retain their DOM/session and reappear on the next drawn frame after reopening.
+pub fn hide_all() {
+    ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        if let Some(engine) = engine.as_mut() {
+            hide_visible(engine);
+        }
+    });
+}
+
 /// Drops every page: the window is closing or the app quitting, and each web view must go before
 /// the window it is parented to. On `App::on_close` and `App::on_quit`. The host goes with them,
 /// so a frame still in flight cannot attach a page to a window that is gone.
@@ -1099,12 +1111,15 @@ mod platform {
     pub(crate) fn bring_to_front(hwnd: windows_sys::Win32::Foundation::HWND) {
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
-            ShowWindow, SW_RESTORE,
+            GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+            SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
         };
         // SAFETY: `hwnd` is the live Rune window's handle (`window_created`); read-only calls
-        // plus one restore/foreground switch on it, on the window's own thread.
+        // plus one show/restore/foreground switch on it, on the window's own thread.
         unsafe {
+            if IsWindowVisible(hwnd) == 0 {
+                ShowWindow(hwnd, SW_SHOW);
+            }
             if IsIconic(hwnd) != 0 {
                 ShowWindow(hwnd, SW_RESTORE);
             }
@@ -1423,17 +1438,38 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "windows")]
+thread_local! {
+    static APP_HANDLE: RefCell<Option<rune::AppHandle<ShellState>>> = const { RefCell::new(None) };
+}
+
+/// Remembers Rune's [`rune::AppHandle`] so single-instance wakes can reopen the window when it
+/// has been hidden to the Windows system tray (`keep_running`).
+#[cfg(target_os = "windows")]
+pub fn remember_app_handle(handle: rune::AppHandle<ShellState>) {
+    APP_HANDLE.with(|slot| *slot.borrow_mut() = Some(handle));
+}
+
 /// Brings the window forward: the primary's response to anything a second launch handed over
 /// (a link, or a focus-only ping — "open Station" with no URL is still the user asking for the
 /// window). The raw handle `window_created` kept is the one place this can happen from.
 /// Failure is logged once and never fatal: focus is a courtesy, the link is already acted on.
 pub fn focus_window() {
     #[cfg(target_os = "windows")]
-    PARENT.with(|parent| {
-        if let Some(rune::raw_window_handle::RawWindowHandle::Win32(handle)) = *parent.borrow() {
-            platform::bring_to_front(platform::hwnd_from_isize(handle.hwnd.get()));
-        }
-    });
+    {
+        APP_HANDLE.with(|slot| {
+            if let Some(handle) = slot.borrow().as_ref() {
+                handle.open();
+                handle.focus();
+            }
+        });
+        PARENT.with(|parent| {
+            if let Some(rune::raw_window_handle::RawWindowHandle::Win32(handle)) = *parent.borrow()
+            {
+                platform::bring_to_front(platform::hwnd_from_isize(handle.hwnd.get()));
+            }
+        });
+    }
     #[cfg(not(target_os = "windows"))]
     {}
 }

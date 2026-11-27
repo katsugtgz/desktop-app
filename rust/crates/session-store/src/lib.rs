@@ -157,6 +157,10 @@ pub struct SessionState {
     /// (default `false`), and older builds ignore it — format version stays 1.
     #[serde(default)]
     pub include_beta_updates: bool,
+    /// Whether closing the main window hides Station to the Windows system tray instead of
+    /// quitting (Slice 35). Additive v1 field (default `false`).
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 /// One pinned favorite belonging to an installed application.

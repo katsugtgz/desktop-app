@@ -438,3 +438,133 @@ fn the_settings_toggle_draws_and_follows_the_state() {
     let why = element_text(&rt, "settings-start-at-login-error-text").expect("the error row");
     assert!(why.contains("denied"), "the row says why: {why}");
 }
+
+// ---- Minimize / close to tray (Slice 35) ------------------------------------------------
+
+#[test]
+fn minimize_to_tray_row_is_absent_where_tray_is_unsupported() {
+    let state = launched(&session_path("mtt-row"));
+    assert!(
+        settings::minimize_to_tray_model(&state, false).is_none(),
+        "no stub tray toggle on a platform without a tray"
+    );
+    let model = settings::minimize_to_tray_model(&state, true).expect("Windows tray row");
+    assert_eq!(model.key, "settings-minimize-to-tray");
+    assert!(!model.on);
+}
+
+#[test]
+fn minimize_to_tray_toggle_round_trips_through_session() {
+    let path = session_path("mtt-roundtrip");
+    let mut state = launched(&path);
+    assert!(!state.minimize_to_tray());
+
+    state.toggle_minimize_to_tray();
+    assert!(state.minimize_to_tray());
+    let saved = SessionStore::new(&path).load().expect("load saved");
+    assert!(saved.minimize_to_tray);
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(document["minimizeToTray"], true);
+    assert_eq!(document["version"], FORMAT_VERSION);
+
+    let relaunched = launched(&path);
+    assert!(relaunched.minimize_to_tray());
+
+    state.toggle_minimize_to_tray();
+    assert!(!state.minimize_to_tray());
+    assert!(
+        !SessionStore::new(&path)
+            .load()
+            .expect("load off")
+            .minimize_to_tray
+    );
+}
+
+#[test]
+fn close_hides_pages_to_tray_when_enabled_and_quits_when_disabled_or_quitting() {
+    use crate::webview::fake::{Event, FakeWebview};
+
+    let path = session_path("mtt-close");
+    let mut state = launched(&path);
+    let app = state
+        .popular()
+        .cream_of_the_crop_apps
+        .first()
+        .expect("popular app")
+        .clone();
+    state.activate_tile(&app);
+    assert!(state.shows_page());
+
+    let (fake, log) = FakeWebview::new();
+    webview::install(Box::new(fake));
+    let mut rt = runtime(state);
+    draw(&mut rt);
+    let tab_id = rt.state.active().id.clone();
+    assert!(
+        log.events()
+            .iter()
+            .any(|e| matches!(e, Event::Attach { tab, .. } if tab == &tab_id)),
+        "active web page attached before close"
+    );
+
+    // 1. With tray supported + minimize_to_tray enabled + not quitting -> hide page, do NOT detach.
+    rt.state.set_minimize_to_tray(true);
+    let mut tx = rune::Tx::default();
+    let action = crate::handle_close(&mut rt.state, &mut tx, true, false);
+    assert_eq!(action, crate::CloseAction::HiddenToTray);
+    assert!(
+        log.events()
+            .iter()
+            .any(|e| matches!(e, Event::Visible { tab, visible: false } if tab == &tab_id)),
+        "hiding to tray must hide the visible WebView2"
+    );
+    assert!(
+        !log.events()
+            .iter()
+            .any(|e| matches!(e, Event::Detach { .. })),
+        "hiding to tray must keep pages attached for instant reopen"
+    );
+
+    // Reopening draws a frame -> sync shows the same attached page again without re-attaching.
+    let attaches_before = log
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Attach { .. }))
+        .count();
+    draw(&mut rt);
+    let attaches_after = log
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Attach { .. }))
+        .count();
+    assert_eq!(attaches_before, attaches_after);
+    assert!(matches!(
+        log.events().last(),
+        Some(Event::Visible { tab, visible: true }) if tab == &tab_id
+    ));
+
+    // 2. When quitting is true (e.g. tray Exit), even with minimize_to_tray enabled it quits cleanly.
+    let mut tx_quit = rune::Tx::default();
+    let action_quit = crate::handle_close(&mut rt.state, &mut tx_quit, true, true);
+    assert_eq!(action_quit, crate::CloseAction::Quit);
+    assert!(
+        log.events()
+            .iter()
+            .any(|e| matches!(e, Event::Detach { tab } if tab == &tab_id)),
+        "explicit quit must detach all pages"
+    );
+
+    // 3. When tray is unsupported or minimize_to_tray is false, closing quits cleanly.
+    let mut state2 = launched(&session_path("mtt-close-off"));
+    let mut tx2 = rune::Tx::default();
+    assert_eq!(
+        crate::handle_close(&mut state2, &mut tx2, true, false),
+        crate::CloseAction::Quit
+    );
+    state2.set_minimize_to_tray(true);
+    assert_eq!(
+        crate::handle_close(&mut state2, &mut tx2, false, false),
+        crate::CloseAction::Quit
+    );
+}

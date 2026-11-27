@@ -285,6 +285,8 @@ pub struct ShellState {
     /// Why the login item could not be read or written, for the Settings row. Cleared by the
     /// next successful read; a failed write keeps the last known truth, so no toggle lies.
     start_at_login_error: Option<String>,
+    /// Whether closing the main window hides Station to the Windows system tray (Slice 35).
+    minimize_to_tray: bool,
     surface: Surface,
     page_error: Option<PageError>,
     /// Failed writes since the last success: logged at most every [`SAVE_LOG_EVERY_S`].
@@ -455,6 +457,7 @@ impl ShellState {
             theme: ThemePreference::System,
             start_at_login: false,
             start_at_login_error: None,
+            minimize_to_tray: false,
             surface: Surface::Apps,
             page_error: None,
             save_failures: 0,
@@ -534,6 +537,7 @@ impl ShellState {
         let favorites = std::mem::take(&mut stored.favorites);
         let download_dir = stored.download_dir.take();
         let include_beta_updates = stored.include_beta_updates;
+        let minimize_to_tray = stored.minimize_to_tray;
         let mut service = service;
         let mut replayed = true;
         if !(stored.installed.is_empty() && stored.dock.is_empty() && stored.tabs.is_empty()) {
@@ -550,6 +554,7 @@ impl ShellState {
         state.window = window;
         state.theme = theme;
         state.start_at_login = stored.start_at_login;
+        state.minimize_to_tray = minimize_to_tray;
         state.include_beta_updates = include_beta_updates;
         state
             .about_state
@@ -1940,6 +1945,25 @@ impl ShellState {
         self.set_start_at_login(!self.start_at_login, &crate::autolaunch::SystemLoginItem);
     }
 
+    /// Whether closing the main window hides Station to the Windows system tray instead of quitting.
+    pub fn minimize_to_tray(&self) -> bool {
+        self.minimize_to_tray
+    }
+
+    /// Sets minimize-to-tray preference and persists immediately to the session document.
+    pub fn set_minimize_to_tray(&mut self, enabled: bool) {
+        if self.minimize_to_tray == enabled {
+            return;
+        }
+        self.minimize_to_tray = enabled;
+        self.persist();
+    }
+
+    /// Toggles minimize-to-tray from the Settings -> General switch.
+    pub(crate) fn toggle_minimize_to_tray(&mut self) {
+        self.set_minimize_to_tray(!self.minimize_to_tray);
+    }
+
     /// Active and recent downloads displayed in the bottom Rune downloads bar (Slice 33).
     pub fn downloads(&self) -> &[crate::downloads::DownloadItem] {
         &self.downloads
@@ -2616,6 +2640,7 @@ impl ShellState {
                 .collect(),
             download_dir: self.download_dir.clone(),
             include_beta_updates: self.include_beta_updates,
+            minimize_to_tray: self.minimize_to_tray,
         }
     }
 }
