@@ -445,6 +445,7 @@ pub fn after_frame(rt: &Runtime<ShellState>) {
 /// starts the icons worker on the same waker (a fetched icon wakes the next frame itself).
 pub fn setup(state: &mut ShellState, waker: rune::Waker) {
     crate::routing::remember_waker(waker.clone());
+    crate::downloads::remember_waker(waker.clone());
     state.start_icons(waker);
 }
 
@@ -471,11 +472,13 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     }
     changed |= links.changed;
     // A page's notification messages (`bxApi.notificationCenter`), a finished snooze, OS DND
-    // state for `Snooze::SyncWithOs`, and freshly fetched icons are frame work.
+    // state for `Snooze::SyncWithOs`, download lifecycle notices, and freshly fetched icons are
+    // frame work.
     changed |= crate::notifications::deliver_to_at(state, clock);
     changed |= crate::notifications::expire_snooze(state, clock);
     changed |= crate::notifications::poll_os_dnd(state, clock);
     sync_snooze(state.effective_snooze_duration_ms());
+    changed |= state.apply_download_events(crate::downloads::drain_events());
     changed |= state.poll_oauth();
     state.prefetch_icons();
     changed |= state.drain_icons();

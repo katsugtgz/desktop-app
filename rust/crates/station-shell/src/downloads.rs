@@ -93,6 +93,104 @@ pub fn downloads_dir() -> Option<PathBuf> {
     dirs::download_dir().or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
 }
 
+/// Height of the Rune downloads strip at the bottom of the pane (shrinks `content` cleanly so
+/// WebView2 never overlaps it).
+pub const DOWNLOADS_BAR_HEIGHT: f32 = 40.0;
+
+/// Maximum recent download items kept in the shell's bar.
+pub const MAX_RECENT_DOWNLOADS: usize = 16;
+
+/// Maximum queued download lifecycle events held between frames.
+const MAX_PENDING_EVENTS: usize = 64;
+
+/// Lifecycle state of one download shown in the native downloads bar (Slice 33).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadStatus {
+    InProgress,
+    Completed,
+    Failed,
+    Refused(Refusal),
+}
+
+/// One download entry held by [`crate::state::ShellState`] for the downloads bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadItem {
+    pub id: u64,
+    pub filename: String,
+    pub path: Option<PathBuf>,
+    pub status: DownloadStatus,
+}
+
+/// Lifecycle update emitted by [`accept`] / [`finished`] and drained on the UI frame poll.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadEvent {
+    Started {
+        filename: String,
+        path: PathBuf,
+    },
+    Completed {
+        filename: String,
+        path: Option<PathBuf>,
+        success: bool,
+    },
+    Refused {
+        filename: String,
+        refusal: Refusal,
+    },
+}
+
+/// Optional user-configured downloads directory (Settings -> General).
+static CUSTOM_DIR: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Pending download lifecycle events waiting for the next Rune frame poll.
+static EVENTS: LazyLock<Mutex<Vec<DownloadEvent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Cross-thread Rune wake handle so a download completion on any thread wakes the UI loop.
+static WAKER: LazyLock<Mutex<Option<rune::Waker>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Remembers Rune's wake handle (`webview::setup`).
+pub fn remember_waker(waker: rune::Waker) {
+    *WAKER.lock().unwrap_or_else(|p| p.into_inner()) = Some(waker);
+}
+
+fn wake_ui() {
+    if let Some(wake) = WAKER.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        wake();
+    }
+}
+
+fn push_event(event: DownloadEvent) {
+    let mut events = EVENTS.lock().unwrap_or_else(|p| p.into_inner());
+    if events.len() >= MAX_PENDING_EVENTS {
+        events.remove(0);
+    }
+    events.push(event);
+    drop(events);
+    wake_ui();
+}
+
+/// Drains queued download events on the UI thread (`webview::poll_at`).
+pub fn drain_events() -> Vec<DownloadEvent> {
+    #[cfg(test)]
+    let _serial = crate::test_support::lock();
+    let mut events = EVENTS.lock().unwrap_or_else(|p| p.into_inner());
+    std::mem::take(&mut *events)
+}
+
+/// Sets or clears the user-configured downloads folder.
+pub fn set_custom_dir(dir: Option<PathBuf>) {
+    *CUSTOM_DIR.lock().unwrap_or_else(|p| p.into_inner()) = dir;
+}
+
+/// The active downloads directory: the user's configured folder when set, else [`downloads_dir`].
+pub fn effective_downloads_dir() -> Option<PathBuf> {
+    CUSTOM_DIR
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .or_else(downloads_dir)
+}
+
 /// One suggested name reduced to a name this shell will create, or `None` when nothing usable is
 /// left. Reduction order: last path component, control characters dropped, `< > : " | ? *`
 /// replaced with `_`, leading whitespace and trailing whitespace/dots removed, reserved device
@@ -219,8 +317,12 @@ fn reservations() -> MutexGuard<'static, Vec<(PathBuf, String)>> {
 /// `SetCancel(true)` and the download never starts.
 pub fn accept(url: &str, path: &mut PathBuf) -> bool {
     let stored_url: String = url.chars().take(MAX_RESERVED_URL_CHARS).collect();
-    let Some(dir) = downloads_dir() else {
+    let Some(dir) = effective_downloads_dir() else {
         refuse(&stored_url, Refusal::NoDownloadsFolder);
+        push_event(DownloadEvent::Refused {
+            filename: "download".to_owned(),
+            refusal: Refusal::NoDownloadsFolder,
+        });
         return false;
     };
 
@@ -238,13 +340,30 @@ pub fn accept(url: &str, path: &mut PathBuf) -> bool {
     });
     match outcome {
         Ok(target) => {
+            let filename = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download".to_owned());
             reserved.push((target.clone(), stored_url));
-            *path = target;
+            *path = target.clone();
+            drop(reserved);
+            push_event(DownloadEvent::Started {
+                filename,
+                path: target,
+            });
             true
         }
         Err(refusal) => {
             drop(reserved);
             refuse(&stored_url, refusal);
+            let display_name = suggested
+                .as_deref()
+                .and_then(sanitize_file_name)
+                .unwrap_or_else(|| "download".to_owned());
+            push_event(DownloadEvent::Refused {
+                filename: display_name,
+                refusal,
+            });
             false
         }
     }
@@ -254,31 +373,47 @@ pub fn accept(url: &str, path: &mut PathBuf) -> bool {
 /// Matched by path (verbatim or `\\?\`-simplified), then by file name, then by URL — WebView2's
 /// completion path is the same target in the normal case, and the fallbacks keep one odd report
 /// from leaking a slot for the rest of the run.
-pub fn finished(url: &str, path: Option<&Path>, _success: bool) {
+pub fn finished(url: &str, path: Option<&Path>, success: bool) {
     let mut reserved = reservations();
+    let mut released_path: Option<PathBuf> = None;
     if let Some(path) = path {
         let simplified = simplify(path);
         if let Some(index) = reserved
             .iter()
             .position(|(held, _)| simplify(held) == simplified)
         {
-            reserved.remove(index);
-            return;
-        }
-        if let Some(name) = simplified.file_name().and_then(|name| name.to_str()) {
+            released_path = Some(reserved.remove(index).0);
+        } else if let Some(name) = simplified.file_name().and_then(|name| name.to_str()) {
             if let Some(index) = reserved.iter().position(|(held, _)| {
                 held.file_name()
                     .and_then(|held_name| held_name.to_str())
                     .is_some_and(|held_name| held_name.eq_ignore_ascii_case(name))
             }) {
-                reserved.remove(index);
-                return;
+                released_path = Some(reserved.remove(index).0);
             }
         }
+        if released_path.is_none() {
+            released_path = Some(simplified);
+        }
     }
-    if let Some(index) = reserved.iter().position(|(_, held_url)| held_url == url) {
-        reserved.remove(index);
+    if released_path.is_none() {
+        if let Some(index) = reserved.iter().position(|(_, held_url)| held_url == url) {
+            released_path = Some(reserved.remove(index).0);
+        }
     }
+    drop(reserved);
+
+    let filename = released_path
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .or_else(|| name_from_url(url).and_then(|n| sanitize_file_name(&n)))
+        .unwrap_or_else(|| "download".to_owned());
+    push_event(DownloadEvent::Completed {
+        filename,
+        path: released_path,
+        success,
+    });
 }
 
 /// How many downloads are reserved right now (a test seam; the shell never asks).
@@ -287,11 +422,251 @@ pub fn in_flight() -> usize {
     reservations().len()
 }
 
-/// Empties the reservation list (tests only: a failed assertion mid-test would otherwise leave a
-/// slot held for every later test in the process).
+/// Empties the reservation list, custom dir, and pending events (tests only).
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     reservations().clear();
+    *CUSTOM_DIR.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    EVENTS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// Opens a local downloaded file or folder via the OS handler (`ShellExecuteW` on Windows,
+/// never a shell command interpreter). Only called on shell-owned download paths or the user's
+/// configured downloads directory.
+pub fn open_local_path(path: &Path) {
+    let text = path.to_string_lossy();
+    if text.trim().is_empty() || text.chars().any(char::is_control) {
+        return;
+    }
+    #[cfg(test)]
+    {
+        let recorded = LOCAL_OPENS.with(|slot| slot.borrow().clone());
+        if let Some(recorded) = recorded {
+            recorded.borrow_mut().push(path.to_path_buf());
+            return;
+        }
+    }
+    if let Err(why) = launch_local_path(path) {
+        eprintln!(
+            "station-shell: could not open download path {}: {why}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn launch_local_path(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let operation = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+    // SAFETY: both strings are NUL-terminated UTF-16 and live for the call.
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    if (result as isize) <= 32 {
+        Err(format!("ShellExecuteW returned {}", result as isize))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launch_local_path(path: &Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|why| why.to_string())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_local_path(path: &Path) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|why| why.to_string())
+}
+
+#[cfg(test)]
+type LocalOpener = std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>;
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_OPENS: std::cell::RefCell<Option<LocalOpener>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Captures [`open_local_path`] calls on this thread during tests instead of spawning Explorer.
+#[cfg(test)]
+pub fn record_local_opens() -> LocalOpener {
+    let recorded: LocalOpener = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    LOCAL_OPENS.with(|slot| *slot.borrow_mut() = Some(recorded.clone()));
+    recorded
+}
+
+#[cfg(test)]
+pub fn recorded_local_opens(recorded: &LocalOpener) -> Vec<PathBuf> {
+    recorded.borrow().clone()
+}
+
+/// Draws the 40 pt Rune downloads bar at the bottom of the pane whenever downloads are present.
+pub fn bar(state: &crate::state::ShellState, p: crate::shell::Paint) -> rune::El {
+    use rune::tok::{space, type_};
+    use rune::{row, text};
+
+    let items = state.downloads();
+    let Some(latest) = items.first() else {
+        return rune::el().key("downloads-bar-empty").h(0.0);
+    };
+    let status_text = match latest.status {
+        DownloadStatus::InProgress => "Downloading",
+        DownloadStatus::Completed => "Saved",
+        DownloadStatus::Failed => "Failed",
+        DownloadStatus::Refused(refusal) => refusal.reason(),
+    };
+    let latest_id = latest.id;
+    let open_path = if latest.status == DownloadStatus::Completed {
+        latest.path.clone()
+    } else {
+        None
+    };
+    let folder_path = latest
+        .path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(effective_downloads_dir);
+
+    let mut actions = row().key("downloads-actions").gap(space::S2).center_y();
+    if let Some(file_path) = open_path {
+        actions = actions.child(bar_btn(
+            "downloads-open",
+            "Open downloaded file",
+            "Open",
+            p,
+            move |_| {
+                open_local_path(&file_path);
+            },
+        ));
+    }
+    if let Some(dir_path) = folder_path {
+        actions = actions.child(bar_btn(
+            "downloads-folder",
+            "Show downloads folder",
+            "Folder",
+            p,
+            move |_| {
+                open_local_path(&dir_path);
+            },
+        ));
+    }
+    actions = actions.child(bar_btn(
+        "downloads-dismiss",
+        "Dismiss download notice",
+        "Dismiss",
+        p,
+        move |state| {
+            state.dismiss_download(latest_id);
+        },
+    ));
+    if items.len() >= 2 {
+        actions = actions.child(bar_btn(
+            "downloads-clear-all",
+            "Clear all download notices",
+            "Clear all",
+            p,
+            |state| {
+                state.clear_downloads();
+            },
+        ));
+    }
+
+    let mut left = row()
+        .key("downloads-summary")
+        .grow(1.0)
+        .gap(space::S2)
+        .center_y()
+        .child(
+            text(status_text)
+                .key("downloads-status")
+                .font(type_::LABEL)
+                .color(match latest.status {
+                    DownloadStatus::Failed | DownloadStatus::Refused(_) => {
+                        rune::color::hex("#EF5757").unwrap_or(p.t.text)
+                    }
+                    DownloadStatus::Completed => rune::tok::accent(0, p.dark),
+                    DownloadStatus::InProgress => p.t.text_secondary,
+                }),
+        )
+        .child(
+            text(latest.filename.clone())
+                .key("downloads-filename")
+                .font(type_::BODY)
+                .color(p.t.text)
+                .truncate(),
+        );
+    if items.len() > 1 {
+        left = left.child(
+            text(format!("+{} more", items.len() - 1))
+                .key("downloads-more")
+                .font(type_::MONO_CAPTION)
+                .color(p.t.text_secondary),
+        );
+    }
+
+    row()
+        .key("downloads-bar")
+        .w_full()
+        .h(DOWNLOADS_BAR_HEIGHT)
+        .px(space::S6)
+        .gap(space::S3)
+        .center_y()
+        .justify_between()
+        .fill(p.t.card)
+        .border_sides([1.0, 0.0, 0.0, 0.0], p.t.separator)
+        .child(left)
+        .child(actions)
+}
+
+fn bar_btn(
+    key: &'static str,
+    label: &'static str,
+    caption: &'static str,
+    p: crate::shell::Paint,
+    on_press: impl Fn(&mut crate::state::ShellState) + 'static,
+) -> rune::El {
+    use rune::tok::{radius, space, type_};
+    use rune::{el, text};
+    el().key(key)
+        .role("button")
+        .label(label)
+        .focusable(true)
+        .h(24.0)
+        .px(space::S2)
+        .center()
+        .radius(radius::SM)
+        .fill(p.t.control_track)
+        .hover(p.t.hover)
+        .press(p.t.press)
+        .on_press(on_press)
+        .child(
+            text(caption)
+                .font(type_::LABEL)
+                .color(p.t.text)
+                .a11y_hidden(),
+        )
 }
 
 /// True when two paths name the same target: equal after stripping the Windows verbatim prefix.

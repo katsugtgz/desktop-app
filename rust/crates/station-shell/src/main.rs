@@ -143,6 +143,7 @@ fn main() {
             ("about", |state| state.open_about()),
             ("quick-switch", |state| state.open_quick_switch()),
             ("custom-app", |state| state.open_custom_app_form()),
+            ("downloads", |state| state.seed_downloads_scene()),
         ],
         ..rune::AppSpec::new(
             "Station",

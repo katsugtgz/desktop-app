@@ -111,16 +111,21 @@ pub fn enqueue(origin_tab: &str, url: &str) -> bool {
         enqueue_locked(&mut queue, origin_tab, url)
     };
     if queued {
-        WAKER.with(|waker| {
-            // A re-entrant or poisoned borrow must not take the shell down mid-frame.
-            if let Ok(slot) = waker.try_borrow() {
-                if let Some(wake) = slot.as_ref() {
-                    wake();
-                }
-            }
-        });
+        wake();
     }
     queued
+}
+
+/// Wakes the shell's next Rune frame from any caller on this thread, if a waker is registered.
+pub fn wake() {
+    WAKER.with(|waker| {
+        // A re-entrant or poisoned borrow must not take the shell down mid-frame.
+        if let Ok(slot) = waker.try_borrow() {
+            if let Some(wake) = slot.as_ref() {
+                wake();
+            }
+        }
+    });
 }
 
 fn enqueue_locked(queue: &mut Vec<Request>, origin_tab: &str, url: &str) -> bool {

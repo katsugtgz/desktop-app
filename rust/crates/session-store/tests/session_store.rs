@@ -93,6 +93,7 @@ fn full_state() -> SessionState {
             title: "Slack General".to_owned(),
             url: "https://app.slack.com/client".to_owned(),
         }],
+        download_dir: Some("/tmp/station-downloads".to_owned()),
     }
 }
 
@@ -1007,4 +1008,39 @@ fn favorites_refuse_unknown_apps_duplicates_and_control_chars() {
         store.save(&ctrl),
         Err(StoreError::BadFavorite { .. })
     ));
+}
+
+#[test]
+fn download_dir_round_trips_and_refuses_empty_control_or_oversized_paths() {
+    let dir = TempDir::new("download-dir");
+    let store = dir.store();
+
+    let mut state = SessionState {
+        download_dir: Some("/tmp/station-downloads".to_owned()),
+        ..SessionState::default()
+    };
+    store.save(&state).expect("save valid downloadDir");
+    let loaded = store.load().expect("load valid downloadDir");
+    assert_eq!(
+        loaded.download_dir.as_deref(),
+        Some("/tmp/station-downloads")
+    );
+
+    let before = read_bytes(&dir.path().join("session.json"));
+    for bad in [
+        "   ".to_owned(),
+        "/tmp/bad\npath".to_owned(),
+        format!("/{}", "a".repeat(session_store::MAX_DOWNLOAD_DIR_CHARS + 1)),
+    ] {
+        state.download_dir = Some(bad);
+        assert!(matches!(
+            store.save(&state),
+            Err(StoreError::BadDownloadDir { .. })
+        ));
+    }
+    assert_eq!(
+        read_bytes(&dir.path().join("session.json")),
+        before,
+        "refused downloadDir saves must leave the previous file intact"
+    );
 }

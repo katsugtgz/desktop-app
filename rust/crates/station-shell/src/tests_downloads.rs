@@ -249,10 +249,18 @@ fn the_directory_is_the_os_downloads_folder() {
     }
 }
 
+struct ResetOnDrop;
+impl Drop for ResetOnDrop {
+    fn drop(&mut self) {
+        downloads::reset_for_tests();
+    }
+}
+
 #[test]
 fn accept_lands_in_downloads_and_reserves_until_finished() {
     let _guard = test_support::lock();
     downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
 
     let mut path = PathBuf::from("ignored/report.pdf");
     assert!(downloads::accept(
@@ -280,6 +288,7 @@ fn accept_lands_in_downloads_and_reserves_until_finished() {
 fn accept_refuses_a_page_that_can_only_offer_junk() {
     let _guard = test_support::lock();
     downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
 
     // A blank suggestion and no usable URL segment: nothing is created, nothing reserved.
     let mut path = PathBuf::from("");
@@ -291,6 +300,7 @@ fn accept_refuses_a_page_that_can_only_offer_junk() {
 fn accept_stops_at_the_concurrency_cap_and_recovers() {
     let _guard = test_support::lock();
     downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
 
     let urls: Vec<String> = (0..MAX_CONCURRENT)
         .map(|index| format!("https://example.com/file-{index}.bin"))
@@ -324,6 +334,7 @@ fn accept_stops_at_the_concurrency_cap_and_recovers() {
 fn a_completion_with_a_verbatim_path_still_releases() {
     let _guard = test_support::lock();
     downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
 
     let mut path = PathBuf::from("release-me.txt");
     assert!(downloads::accept(
@@ -342,6 +353,7 @@ fn a_completion_with_a_verbatim_path_still_releases() {
 fn a_completion_without_a_path_falls_back_to_the_url() {
     let _guard = test_support::lock();
     downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
 
     let mut path = PathBuf::from("no-path.bin");
     assert!(downloads::accept(
@@ -351,4 +363,181 @@ fn a_completion_without_a_path_falls_back_to_the_url() {
     assert_eq!(in_flight(), 1);
     downloads::finished("https://example.com/no-path.bin", None, false);
     assert_eq!(in_flight(), 0);
+}
+
+#[test]
+fn downloads_bar_shrinks_content_handles_open_folder_dismiss_and_clear_all() {
+    use appstore_service::ApplicationService;
+    use rune::{Env, Runtime};
+
+    let _guard = test_support::lock();
+    downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
+    let opened = downloads::record_local_opens();
+
+    let custom_dir = scratch("bar-ui");
+    downloads::set_custom_dir(Some(custom_dir.clone()));
+
+    let mut rt = Runtime::new(
+        crate::state::ShellState::new(ApplicationService::for_tests("downloads-bar-ui")),
+        crate::shell::view,
+        (1200.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.frame(1.0 / 60.0);
+    let base_rect = crate::webview::pane_rect(&rt).expect("base content rect");
+    assert!(rt.find("downloads-bar").is_none());
+
+    // Start two downloads via the real accept/finished hooks and poll them into the UI.
+    let mut first = PathBuf::from("a.pdf");
+    assert!(downloads::accept("https://example.com/a.pdf", &mut first));
+    assert_eq!(first.parent(), Some(custom_dir.as_path()));
+    downloads::finished("https://example.com/a.pdf", Some(&first), true);
+
+    let mut second = PathBuf::from("b.zip");
+    assert!(downloads::accept("https://example.com/b.zip", &mut second));
+    downloads::finished("https://example.com/b.zip", Some(&second), true);
+
+    assert!(crate::webview::poll_at(&mut rt.state, 1.0));
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    rt.settle_all();
+    rt.frame(1.0 / 60.0);
+
+    assert!(rt.find("downloads-bar").is_some());
+    assert!(rt.find("downloads-clear-all").is_some());
+    let shrunk_rect = crate::webview::pane_rect(&rt).expect("shrunk content rect");
+    assert!(
+        (base_rect.h - shrunk_rect.h - downloads::DOWNLOADS_BAR_HEIGHT).abs() < 1.0,
+        "downloads bar must shrink content by {} pt: before={} after={}",
+        downloads::DOWNLOADS_BAR_HEIGHT,
+        base_rect.h,
+        shrunk_rect.h
+    );
+
+    // Open downloaded file and open its containing folder.
+    for key in ["downloads-open", "downloads-folder"] {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("missing {key}"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    }
+    let opens = downloads::recorded_local_opens(&opened);
+    assert_eq!(opens, vec![second.clone(), custom_dir.clone()]);
+
+    // Dismiss removes latest item (leaving 1 item -> Clear all disappears).
+    let (dx, dy) = rt.find("downloads-dismiss").expect("dismiss button");
+    rt.pointer_down(dx, dy);
+    rt.pointer_up(dx, dy);
+    rt.frame(1.0 / 60.0);
+    rt.settle_all();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.downloads().len(), 1);
+    assert!(rt.find("downloads-clear-all").is_none());
+
+    // Add another item and press Clear all to hide the bar and restore full content height.
+    let mut third = PathBuf::from("c.txt");
+    assert!(downloads::accept("https://example.com/c.txt", &mut third));
+    downloads::finished("https://example.com/c.txt", Some(&third), true);
+    assert!(crate::webview::poll_at(&mut rt.state, 2.0));
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    rt.settle_all();
+    rt.frame(1.0 / 60.0);
+    let (cx, cy) = rt.find("downloads-clear-all").expect("clear-all button");
+    rt.pointer_down(cx, cy);
+    rt.pointer_up(cx, cy);
+    rt.frame(1.0 / 60.0);
+    rt.settle_all();
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("downloads-bar").is_none());
+    let restored_rect = crate::webview::pane_rect(&rt).expect("restored content rect");
+    assert!((restored_rect.h - base_rect.h).abs() < 1.0);
+
+    let _ = fs::remove_dir_all(&custom_dir);
+}
+
+#[test]
+fn settings_download_dir_persists_validates_and_resets() {
+    use appstore_service::ApplicationService;
+    use rune::{Env, Runtime, TextEdit};
+
+    let _guard = test_support::lock();
+    downloads::reset_for_tests();
+    let _reset = ResetOnDrop;
+
+    let session_path = std::env::temp_dir().join(format!(
+        "station-shell-download-dir-setting-{}.json",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&session_path);
+    let custom_dir = scratch("settings-dir");
+
+    let mut rt = Runtime::new(
+        crate::state::ShellState::launch_in(
+            ApplicationService::for_tests("dl-dir-settings"),
+            &session_path,
+        ),
+        crate::shell::view,
+        (1200.0, 800.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.frame(1.0 / 60.0);
+
+    // Open Settings -> Change downloads folder.
+    let (sx, sy) = rt.find("rail-settings").expect("settings");
+    rt.pointer_down(sx, sy);
+    rt.pointer_up(sx, sy);
+    rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
+
+    let (ex, ey) = rt.find("settings-download-dir-edit").expect("edit button");
+    rt.pointer_down(ex, ey);
+    rt.pointer_up(ex, ey);
+    rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("settings-download-dir-editor").is_some());
+
+    // Relative path is refused without saving.
+    rt.state.download_dir_draft_mut().unwrap().edit = TextEdit::new("relative/downloads");
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.save_download_dir_draft());
+    assert!(rt.state.download_dir().is_none());
+
+    // Absolute path saves and persists across relaunch.
+    rt.state.download_dir_draft_mut().unwrap().edit =
+        TextEdit::new(custom_dir.display().to_string());
+    assert!(rt.state.save_download_dir_draft());
+    assert_eq!(
+        rt.state.download_dir(),
+        Some(custom_dir.display().to_string().as_str())
+    );
+    assert_eq!(
+        downloads::effective_downloads_dir(),
+        Some(custom_dir.clone())
+    );
+
+    let relaunched = crate::state::ShellState::launch_in(
+        ApplicationService::for_tests("dl-dir-relaunch"),
+        &session_path,
+    );
+    assert_eq!(
+        relaunched.download_dir(),
+        Some(custom_dir.display().to_string().as_str())
+    );
+
+    // Reset reverts to OS default.
+    rt.state.reset_download_dir();
+    assert_eq!(rt.state.download_dir(), None);
+    assert_eq!(downloads::effective_downloads_dir(), downloads_dir());
+
+    let _ = fs::remove_file(&session_path);
+    let _ = fs::remove_dir_all(&custom_dir);
 }

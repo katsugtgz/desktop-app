@@ -37,6 +37,7 @@ pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) 
         return state.close_find()
             || state.close_tab_menu()
             || state.close_custom_app_form()
+            || state.close_download_dir_editor()
             || state.close_overlay();
     }
     if event.is_command('k') || event.is_command('t') {
@@ -161,6 +162,9 @@ pub fn view_themed(state: &ShellState, dark: bool) -> El {
         pane = pane.child(crate::find::bar(state, p));
     }
     pane = pane.child(body);
+    if !state.downloads().is_empty() {
+        pane = pane.child(crate::downloads::bar(state, p));
+    }
     col().key("shell").w_full().h_full().fill(p.t.bg).child(
         row()
             .key("body")

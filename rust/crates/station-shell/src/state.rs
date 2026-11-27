@@ -337,6 +337,20 @@ pub struct ShellState {
     os_dnd_active: bool,
     /// Inline "+ Add custom app" draft while open in `App Store -> My custom apps` (Slice 32).
     custom_app_draft: Option<CustomAppDraft>,
+    /// Optional user-configured downloads folder persisted in the session (Slice 33).
+    download_dir: Option<String>,
+    /// Inline editor for the custom downloads folder inside Settings -> General (Slice 33).
+    download_dir_draft: Option<DownloadDirDraft>,
+    /// Active and recent download records shown in the bottom Rune downloads bar (Slice 33).
+    downloads: Vec<crate::downloads::DownloadItem>,
+    next_download_id: u64,
+}
+
+/// Inline editor draft for Settings -> General -> Downloads folder.
+#[derive(Debug, PartialEq)]
+pub struct DownloadDirDraft {
+    pub edit: TextEdit,
+    pub error: Option<String>,
 }
 
 /// Draft fields for adding a user-defined custom web app in `App Store -> My custom apps`.
@@ -458,6 +472,10 @@ impl ShellState {
             quick_switch: crate::quick_switch::QuickSwitchState::default(),
             os_dnd_active: false,
             custom_app_draft: None,
+            download_dir: None,
+            download_dir_draft: None,
+            downloads: Vec::new(),
+            next_download_id: 1,
         };
         state.rebuild_tabs();
         state
@@ -502,6 +520,7 @@ impl ShellState {
         let rail_order = std::mem::take(&mut stored.rail_order);
         let identities = std::mem::take(&mut stored.identities);
         let favorites = std::mem::take(&mut stored.favorites);
+        let download_dir = stored.download_dir.take();
         let mut service = service;
         let mut replayed = true;
         if !(stored.installed.is_empty() && stored.dock.is_empty() && stored.tabs.is_empty()) {
@@ -519,6 +538,10 @@ impl ShellState {
         state.theme = theme;
         state.start_at_login = stored.start_at_login;
         state.identities = identities;
+        state.download_dir = download_dir.clone();
+        if let Some(dir) = download_dir {
+            crate::downloads::set_custom_dir(Some(PathBuf::from(dir)));
+        }
         if replayed {
             state.favorites = favorites;
         }
@@ -1900,6 +1923,202 @@ impl ShellState {
         self.set_start_at_login(!self.start_at_login, &crate::autolaunch::SystemLoginItem);
     }
 
+    /// Active and recent downloads displayed in the bottom Rune downloads bar (Slice 33).
+    pub fn downloads(&self) -> &[crate::downloads::DownloadItem] {
+        &self.downloads
+    }
+
+    /// Applies lifecycle updates drained from `downloads::drain_events`. True if UI changed.
+    pub fn apply_download_events(&mut self, events: Vec<crate::downloads::DownloadEvent>) -> bool {
+        use crate::downloads::{DownloadEvent, DownloadItem, DownloadStatus, MAX_RECENT_DOWNLOADS};
+        if events.is_empty() {
+            return false;
+        }
+        for event in events {
+            match event {
+                DownloadEvent::Started { filename, path } => {
+                    let id = self.next_download_id;
+                    self.next_download_id = self.next_download_id.saturating_add(1);
+                    self.downloads.insert(
+                        0,
+                        DownloadItem {
+                            id,
+                            filename,
+                            path: Some(path),
+                            status: DownloadStatus::InProgress,
+                        },
+                    );
+                }
+                DownloadEvent::Completed {
+                    filename,
+                    path,
+                    success,
+                } => {
+                    let status = if success {
+                        DownloadStatus::Completed
+                    } else {
+                        DownloadStatus::Failed
+                    };
+                    if let Some(existing) = self.downloads.iter_mut().find(|item| {
+                        item.status == DownloadStatus::InProgress
+                            && ((path.is_some() && item.path == path) || item.filename == filename)
+                    }) {
+                        existing.status = status;
+                        if path.is_some() {
+                            existing.path = path;
+                        }
+                    } else {
+                        let id = self.next_download_id;
+                        self.next_download_id = self.next_download_id.saturating_add(1);
+                        self.downloads.insert(
+                            0,
+                            DownloadItem {
+                                id,
+                                filename,
+                                path,
+                                status,
+                            },
+                        );
+                    }
+                }
+                DownloadEvent::Refused { filename, refusal } => {
+                    let id = self.next_download_id;
+                    self.next_download_id = self.next_download_id.saturating_add(1);
+                    self.downloads.insert(
+                        0,
+                        DownloadItem {
+                            id,
+                            filename,
+                            path: None,
+                            status: DownloadStatus::Refused(refusal),
+                        },
+                    );
+                }
+            }
+        }
+        self.downloads.truncate(MAX_RECENT_DOWNLOADS);
+        true
+    }
+
+    /// Removes one download notice from the downloads bar.
+    pub fn dismiss_download(&mut self, id: u64) -> bool {
+        let before = self.downloads.len();
+        self.downloads.retain(|item| item.id != id);
+        self.downloads.len() != before
+    }
+
+    /// Clears every download notice from the downloads bar.
+    pub fn clear_downloads(&mut self) -> bool {
+        if self.downloads.is_empty() {
+            return false;
+        }
+        self.downloads.clear();
+        true
+    }
+
+    /// Seeds realistic sample downloads for `--scene downloads` snapshots.
+    pub fn seed_downloads_scene(&mut self) {
+        self.downloads = vec![
+            crate::downloads::DownloadItem {
+                id: 2,
+                filename: "quarterly-roadmap-2026.pdf".to_owned(),
+                path: Some(PathBuf::from("/Downloads/quarterly-roadmap-2026.pdf")),
+                status: crate::downloads::DownloadStatus::Completed,
+            },
+            crate::downloads::DownloadItem {
+                id: 1,
+                filename: "design-assets.zip".to_owned(),
+                path: Some(PathBuf::from("/Downloads/design-assets.zip")),
+                status: crate::downloads::DownloadStatus::InProgress,
+            },
+        ];
+        self.next_download_id = 3;
+    }
+
+    /// Custom download directory override stored in the session, if configured.
+    pub fn download_dir(&self) -> Option<&str> {
+        self.download_dir.as_deref()
+    }
+
+    /// Human-readable active downloads folder path shown in Settings -> General.
+    pub fn effective_download_dir_path(&self) -> Option<PathBuf> {
+        self.download_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(crate::downloads::downloads_dir)
+    }
+
+    /// Inline downloads-folder editor draft while open in Settings -> General.
+    pub fn download_dir_draft(&self) -> Option<&DownloadDirDraft> {
+        self.download_dir_draft.as_ref()
+    }
+
+    pub fn download_dir_draft_mut(&mut self) -> Option<&mut DownloadDirDraft> {
+        self.download_dir_draft.as_mut()
+    }
+
+    /// Opens the inline downloads-folder editor pre-filled with the active folder.
+    pub fn open_download_dir_editor(&mut self) {
+        let initial = self
+            .effective_download_dir_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        self.download_dir_draft = Some(DownloadDirDraft {
+            edit: TextEdit::new(initial),
+            error: None,
+        });
+    }
+
+    /// Closes the downloads-folder editor without saving.
+    pub fn close_download_dir_editor(&mut self) -> bool {
+        self.download_dir_draft.take().is_some()
+    }
+
+    /// Validates and saves the edited downloads folder, persisting it to `session.json` and
+    /// updating [`crate::downloads::set_custom_dir`].
+    pub fn save_download_dir_draft(&mut self) -> bool {
+        let Some(raw) = self
+            .download_dir_draft
+            .as_ref()
+            .map(|d| d.edit.text.trim().to_owned())
+        else {
+            return false;
+        };
+        if raw.is_empty() {
+            self.reset_download_dir();
+            return true;
+        }
+        if raw.chars().count() > session_store::MAX_DOWNLOAD_DIR_CHARS
+            || raw.chars().any(char::is_control)
+        {
+            if let Some(d) = self.download_dir_draft.as_mut() {
+                d.error = Some(
+                    "Folder path must be 2048 chars or fewer without control chars.".to_owned(),
+                );
+            }
+            return false;
+        }
+        if !Path::new(&raw).is_absolute() {
+            if let Some(d) = self.download_dir_draft.as_mut() {
+                d.error = Some("Folder path must be an absolute directory path.".to_owned());
+            }
+            return false;
+        }
+        self.download_dir = Some(raw.clone());
+        crate::downloads::set_custom_dir(Some(PathBuf::from(raw)));
+        self.download_dir_draft = None;
+        self.persist();
+        true
+    }
+
+    /// Resets the downloads folder back to the OS default Downloads directory.
+    pub fn reset_download_dir(&mut self) {
+        self.download_dir = None;
+        self.download_dir_draft = None;
+        crate::downloads::set_custom_dir(None);
+        self.persist();
+    }
+
     /// What the content area shows.
     pub fn surface(&self) -> Surface {
         self.surface
@@ -1909,6 +2128,7 @@ impl ShellState {
     pub fn open_settings(&mut self) {
         self.surface = Surface::Settings;
         self.config_draft = None;
+        self.download_dir_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
     }
@@ -1917,6 +2137,7 @@ impl ShellState {
     pub fn open_about(&mut self) {
         self.surface = Surface::About;
         self.config_draft = None;
+        self.download_dir_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
     }
@@ -1953,6 +2174,7 @@ impl ShellState {
         }
         self.surface = Surface::Apps;
         self.config_draft = None;
+        self.download_dir_draft = None;
         self.notifications
             .apply(NotificationAction::SetVisibility { visible: false });
         true
@@ -2270,6 +2492,7 @@ impl ShellState {
                 })
                 .cloned()
                 .collect(),
+            download_dir: self.download_dir.clone(),
         }
     }
 }

@@ -128,6 +128,10 @@ fn general(state: &ShellState, p: Paint) -> El {
             p,
         ));
     }
+    rows.push(downloads_folder_row(state, p));
+    if let Some(editor) = downloads_folder_editor(state, p) {
+        rows.push(editor);
+    }
     rows.push(
         row()
             .key("settings-about-row")
@@ -163,6 +167,205 @@ fn general(state: &ShellState, p: Paint) -> El {
             ),
     );
     section("settings-general", "General", p, rows)
+}
+
+fn downloads_folder_row(state: &ShellState, p: Paint) -> El {
+    let dir_path = state.effective_download_dir_path();
+    let display = dir_path
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "System default".to_owned());
+    let mut actions = row().gap(space::S1).center_y();
+    if let Some(path) = dir_path {
+        actions = actions.child(
+            el().key("settings-download-dir-open")
+                .role("button")
+                .label("Open downloads folder")
+                .focusable(true)
+                .h(24.0)
+                .px(space::S2)
+                .center()
+                .radius(radius::SM)
+                .fill(p.t.control_track)
+                .hover(p.t.hover)
+                .press(p.t.press)
+                .on_press(move |_: &mut ShellState| {
+                    crate::downloads::open_local_path(&path);
+                })
+                .child(
+                    text("Open")
+                        .font(type_::LABEL)
+                        .color(p.t.text)
+                        .a11y_hidden(),
+                ),
+        );
+    }
+    actions = actions.child(
+        el().key("settings-download-dir-edit")
+            .role("button")
+            .label("Change downloads folder")
+            .focusable(true)
+            .h(24.0)
+            .px(space::S2)
+            .center()
+            .radius(radius::SM)
+            .fill(p.t.control_track)
+            .hover(p.t.hover)
+            .press(p.t.press)
+            .on_press(|state: &mut ShellState| {
+                if state.download_dir_draft().is_some() {
+                    state.close_download_dir_editor();
+                } else {
+                    state.open_download_dir_editor();
+                }
+            })
+            .child(
+                text("Change")
+                    .font(type_::LABEL)
+                    .color(p.t.text)
+                    .a11y_hidden(),
+            ),
+    );
+    row()
+        .key("settings-download-dir-row")
+        .h(36.0)
+        .px(space::S3)
+        .gap(space::S3)
+        .center_y()
+        .justify_between()
+        .child(
+            row()
+                .grow(1.0)
+                .gap(space::S3)
+                .center_y()
+                .child(
+                    text("Downloads")
+                        .font(type_::BODY)
+                        .color(p.t.text)
+                        .a11y_hidden(),
+                )
+                .child(
+                    text(display)
+                        .key("settings-download-dir-value")
+                        .font(type_::MONO_CAPTION)
+                        .color(p.t.text_secondary)
+                        .truncate(),
+                ),
+        )
+        .child(actions)
+}
+
+fn downloads_folder_editor(state: &ShellState, p: Paint) -> Option<El> {
+    let draft = state.download_dir_draft()?;
+    let mut box_col = col()
+        .key("settings-download-dir-editor")
+        .w_full()
+        .px(space::S3)
+        .py(space::S2)
+        .gap(space::S2)
+        .child(
+            el().key("settings-download-dir-input-box")
+                .w_full()
+                .h(30.0)
+                .px(space::S2)
+                .center_y()
+                .radius(radius::SM)
+                .fill(p.t.bg)
+                .border(1.0, p.t.control_off)
+                .child(
+                    rune::text_input(&draft.edit, type_::BODY)
+                        .key("settings-download-dir-input")
+                        .w_full()
+                        .single_line()
+                        .label("Downloads folder path")
+                        .placeholder("Absolute folder path", p.t.text_secondary)
+                        .color(p.t.text)
+                        .on_edit(rune::edit_access(|state: &mut ShellState| {
+                            &mut state
+                                .download_dir_draft_mut()
+                                .expect("download dir draft open while editor renders")
+                                .edit
+                        })),
+                ),
+        );
+    if let Some(err) = draft.error.as_deref() {
+        box_col = box_col.child(
+            text(err.to_owned())
+                .key("settings-download-dir-error")
+                .font(type_::LABEL)
+                .color(rune::color::hex("#EF5757").unwrap_or(p.t.text)),
+        );
+    }
+    let mut btn_row = row().gap(space::S2).child(
+        el().key("settings-download-dir-save")
+            .role("button")
+            .label("Save downloads folder")
+            .focusable(true)
+            .h(24.0)
+            .px(space::S2)
+            .center()
+            .radius(radius::SM)
+            .fill(p.t.control_track)
+            .hover(p.t.hover)
+            .press(p.t.press)
+            .on_press(|state: &mut ShellState| {
+                state.save_download_dir_draft();
+            })
+            .child(
+                text("Save")
+                    .font(type_::LABEL)
+                    .color(p.t.text)
+                    .a11y_hidden(),
+            ),
+    );
+    if state.download_dir().is_some() {
+        btn_row = btn_row.child(
+            el().key("settings-download-dir-reset")
+                .role("button")
+                .label("Reset downloads folder to default")
+                .focusable(true)
+                .h(24.0)
+                .px(space::S2)
+                .center()
+                .radius(radius::SM)
+                .fill(p.t.card)
+                .border(1.0, p.t.control_off)
+                .hover(p.t.hover)
+                .press(p.t.press)
+                .on_press(|state: &mut ShellState| {
+                    state.reset_download_dir();
+                })
+                .child(
+                    text("Reset")
+                        .font(type_::LABEL)
+                        .color(p.t.text_secondary)
+                        .a11y_hidden(),
+                ),
+        );
+    }
+    btn_row = btn_row.child(
+        el().key("settings-download-dir-cancel")
+            .role("button")
+            .label("Cancel downloads folder change")
+            .focusable(true)
+            .h(24.0)
+            .px(space::S2)
+            .center()
+            .radius(radius::SM)
+            .fill(p.t.card)
+            .hover(p.t.hover)
+            .press(p.t.press)
+            .on_press(|state: &mut ShellState| {
+                state.close_download_dir_editor();
+            })
+            .child(
+                text("Cancel")
+                    .font(type_::LABEL)
+                    .color(p.t.text_secondary)
+                    .a11y_hidden(),
+            ),
+    );
+    Some(box_col.child(btn_row))
 }
 
 /// The login row's testable content: present only where the platform can manage a login item.

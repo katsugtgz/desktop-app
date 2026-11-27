@@ -48,6 +48,9 @@ pub const MAX_FAVORITES: usize = 256;
 /// Maximum characters per field on a pinned [`FavoriteEntry`].
 pub const MAX_FAVORITE_FIELD_CHARS: usize = 2048;
 
+/// Maximum characters for a custom download directory path.
+pub const MAX_DOWNLOAD_DIR_CHARS: usize = 2048;
+
 /// The window size a session may ask for, in points. Smaller is raised to the minimum, larger is
 /// clamped: a hostile document cannot open a 10,000,000-pixel window.
 ///
@@ -143,6 +146,11 @@ pub struct SessionState {
     /// Added to format 1 after it shipped: `#[serde(default)]` keeps existing documents readable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorites: Vec<FavoriteEntry>,
+    /// User-configured custom downloads directory (Slice 33); absent uses the OS Downloads folder.
+    ///
+    /// Added to format 1 after it shipped: `#[serde(default)]` keeps existing documents readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
 }
 
 /// One pinned favorite belonging to an installed application.
@@ -332,6 +340,9 @@ pub enum StoreError {
         favorite_id: String,
         why: &'static str,
     },
+    /// The custom downloads folder cannot be used: empty, whitespace, control characters, or
+    /// longer than [`MAX_DOWNLOAD_DIR_CHARS`]. Refused whole, never truncated.
+    BadDownloadDir { why: &'static str },
 }
 
 impl std::fmt::Display for StoreError {
@@ -375,6 +386,9 @@ impl std::fmt::Display for StoreError {
                 f,
                 "session store favorite {favorite_id} is not usable: {why}"
             ),
+            StoreError::BadDownloadDir { why } => {
+                write!(f, "session store downloadDir is not usable: {why}")
+            }
         }
     }
 }
@@ -390,7 +404,8 @@ impl std::error::Error for StoreError {
             | StoreError::BadConfig { .. }
             | StoreError::BadRailOrder { .. }
             | StoreError::BadIdentity { .. }
-            | StoreError::BadFavorite { .. } => None,
+            | StoreError::BadFavorite { .. }
+            | StoreError::BadDownloadDir { .. } => None,
         }
     }
 }
@@ -588,6 +603,18 @@ fn sanitize(state: &mut SessionState) -> Result<(), StoreError> {
             return Err(StoreError::BadFavorite {
                 favorite_id: favorite.id.clone(),
                 why: "the favorite references an application that is not installed",
+            });
+        }
+    }
+    if let Some(dir) = &state.download_dir {
+        if dir.trim().is_empty() {
+            return Err(StoreError::BadDownloadDir {
+                why: "the path is empty or whitespace",
+            });
+        }
+        if dir.chars().count() > MAX_DOWNLOAD_DIR_CHARS || dir.chars().any(char::is_control) {
+            return Err(StoreError::BadDownloadDir {
+                why: "the path contains control characters or exceeds 2048 characters",
             });
         }
     }
