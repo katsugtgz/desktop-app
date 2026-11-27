@@ -14,6 +14,7 @@
 //! app with no icon keeps an empty `icon` and draws its letter avatar.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 pub mod config_rules;
 
@@ -285,7 +286,7 @@ pub fn manifest_to_minimal_application(manifest: &Manifest) -> MinimalApplicatio
 pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
     // The bundled definitions are static; parse them once instead of once
     // per search call (the TS module parses them a single time at import).
-    let mut out: Vec<Manifest> = bundled_applications().clone();
+    let mut out = bundled_applications().to_vec();
     out.reserve(private.len());
     for m in private {
         if m.inner.do_not_list != Some(true) {
@@ -296,8 +297,8 @@ pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
 }
 
 /// Bundled, non-`doNotList` manifests, parsed once per process.
-fn bundled_applications() -> &'static Vec<Manifest> {
-    static BUNDLED: std::sync::LazyLock<Vec<Manifest>> = std::sync::LazyLock::new(|| {
+fn bundled_applications() -> &'static [Manifest] {
+    static BUNDLED: LazyLock<Vec<Manifest>> = LazyLock::new(|| {
         get_all_application_ids()
             .into_iter()
             .filter_map(|id| get_application_by_id(&id))
@@ -322,14 +323,10 @@ enum WordHit {
 
 fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
     let mut best = WordHit::Prefix;
-    // Split once: re-scanning the haystack per query word is quadratic on
-    // word-heavy queries.
-    let haystack_words: Vec<&str> = haystack_lower
-        .split(|c: char| !c.is_alphanumeric())
-        .collect();
+    let haystack_words = haystack_lower.split(|c: char| !c.is_alphanumeric());
     for q in words {
         let mut word_best = WordHit::None;
-        for w in &haystack_words {
+        for w in haystack_words.clone() {
             if w.starts_with(q) {
                 word_best = WordHit::Prefix;
             } else if w.contains(q) {
@@ -337,6 +334,9 @@ fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
             }
         }
         best = best.min(word_best);
+        if best == WordHit::None {
+            break;
+        }
     }
     best
 }
@@ -356,34 +356,55 @@ const NO_WORD_HIT_SCORE: i64 = -1;
 /// 3. nucleo fuzzy score (descending),
 ///    then name, then id, for determinism.
 pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
-    let apps = list_all_applications(private);
+    let query = query.trim();
     // Empty pattern: Fuse.search('') returns no results; match that.
-    if query.trim().is_empty() {
+    if query.is_empty() {
         return Vec::new();
     }
 
-    let query_lower = query.trim().to_lowercase();
+    fn search_entry(app: &Manifest) -> (&Manifest, String) {
+        (
+            app,
+            app.inner.name.as_deref().unwrap_or_default().to_lowercase(),
+        )
+    }
+    static BUNDLED_NAMES: LazyLock<Vec<(&Manifest, String)>> =
+        LazyLock::new(|| bundled_applications().iter().map(search_entry).collect());
+    let private: Vec<_> = private
+        .iter()
+        .filter(|app| app.inner.do_not_list != Some(true))
+        .map(search_entry)
+        .collect();
+    let apps = BUNDLED_NAMES.iter().chain(&private);
+    let query_lower = query.to_lowercase();
+
+    // An exact name wins over every other hit. Keep bundled names first and
+    // preserve manifest order when more than one name matches.
+    if let Some((app, _)) = apps.clone().find(|(_, name)| *name == query_lower) {
+        return vec![manifest_to_minimal_application(app)];
+    }
+
     let words: Vec<&str> = query_lower.split_whitespace().collect();
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
 
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut hits: Vec<(WordHit, i64, MinimalApplication)> = Vec::new();
+    let mut hits = Vec::new();
     let mut buf = Vec::new();
-    for app in &apps {
-        let name = app.inner.name.clone().unwrap_or_default();
-        // Exact match (whole name equals the query, like Fuse's
-        // `exactMatch` bonus): always wins.
-        if name.to_lowercase() == query_lower {
-            return vec![manifest_to_minimal_application(app)];
-        }
-
-        let hit = word_hit(&name.to_lowercase(), &words);
+    for &(app, ref name_lower) in apps {
+        let name = app.inner.name.as_deref().unwrap_or_default();
+        let hit = word_hit(name_lower, &words);
 
         if let WordHit::None = hit {
             // Allow one typo per query word (Fuse bitap distance <= 1 at
             // threshold 0.4 finds "gmial" → "Gmail"): retry each word
             // against each name word with edit distance 1.
             if !words.iter().all(|q| {
-                name.to_lowercase()
+                name_lower
                     .split(|c: char| !c.is_alphanumeric())
                     .any(|w| within_one_edit(q, w))
             }) {
@@ -392,24 +413,21 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
         }
 
         buf.clear();
-        let score = Pattern::new(
-            &query_lower,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        )
-        .score(nucleo_matcher::Utf32Str::new(&name, &mut buf), &mut matcher)
-        .map(|s| s as i64)
-        .unwrap_or(NO_WORD_HIT_SCORE);
-        hits.push((hit, score, manifest_to_minimal_application(app)));
+        let score = pattern
+            .score(nucleo_matcher::Utf32Str::new(name, &mut buf), &mut matcher)
+            .map(i64::from)
+            .unwrap_or(NO_WORD_HIT_SCORE);
+        hits.push((hit, score, name, app));
     }
     hits.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(b.1.cmp(&a.1))
-            .then_with(|| a.2.name.cmp(&b.2.name))
-            .then_with(|| a.2.id.cmp(&b.2.id))
+            .then_with(|| a.2.cmp(b.2))
+            .then_with(|| a.3.id.cmp(&b.3.id))
     });
-    hits.into_iter().map(|(_, _, m)| m).collect()
+    hits.into_iter()
+        .map(|(_, _, _, app)| manifest_to_minimal_application(app))
+        .collect()
 }
 
 /// True when `a` and `b` are within one character edit (insert, delete,
@@ -417,48 +435,21 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
 /// transpositions as two edits but still ranks them at threshold 0.4 for
 /// short queries like "gmial" → "gmail") of each other.
 fn within_one_edit(a: &str, b: &str) -> bool {
-    // Char counts must be within one; counting without allocating keeps
-    // huge query words from allocating per name word.
-    let (count_a, count_b) = (a.chars().count(), b.chars().count());
-    if count_a.abs_diff(count_b) > 1 {
-        return false;
-    }
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    match a.len().cmp(&b.len()) {
-        std::cmp::Ordering::Equal => {
-            let diffs = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-            diffs <= 1 || (diffs == 2 && one_transposition(&a, &b))
-        }
-        std::cmp::Ordering::Less => one_insertion(&a, &b),
-        std::cmp::Ordering::Greater => one_insertion(&b, &a),
-    }
-}
-
-/// Equal-length strings differing only by one adjacent swap?
-fn one_transposition(a: &[char], b: &[char]) -> bool {
-    let first = a.iter().zip(b).position(|(x, y)| x != y);
-    let Some(i) = first else { return true };
-    i + 1 < a.len() && a[i] == b[i + 1] && a[i + 1] == b[i] && a[i + 2..] == b[i + 2..]
-}
-
-/// `short` plus exactly one inserted character equals `long`?
-fn one_insertion(short: &[char], long: &[char]) -> bool {
-    if long.len() != short.len() + 1 {
-        return false;
-    }
-    // Walk both; at most one char of `long` may be skipped.
-    let (mut i, mut skipped) = (0, false);
-    for c in long {
-        if i < short.len() && short[i] == *c {
-            i += 1;
-        } else if !skipped {
-            skipped = true;
-        } else {
-            return false;
+    let (mut a, mut b) = (a.chars(), b.chars());
+    loop {
+        let (a_tail, b_tail) = (a.as_str(), b.as_str());
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => continue,
+            (Some(x), Some(y)) => {
+                return a.as_str() == b.as_str() // substitution
+                    || a.as_str() == b_tail || b.as_str() == a_tail // insertion or deletion
+                    || (a.next() == Some(y) && b.next() == Some(x) && a.as_str() == b.as_str());
+            }
+            (None, Some(_)) => return b.as_str().is_empty(),
+            (Some(_), None) => return a.as_str().is_empty(),
         }
     }
-    true
 }
 
 /// Search with a private-manifest store (port of the TS pairing of

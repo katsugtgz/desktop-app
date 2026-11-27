@@ -7,7 +7,7 @@
 //! members plus the click registry the preload also declared — `addNotificationClickListener` /
 //! `removeNotificationClickListener` — and nothing else of `bxApi` is invented — through wry's
 //! `with_ipc_handler` (`webview.rs::platform::attach` injects [`INIT_SCRIPT`] and hands messages
-//! to [`receive`]), and delivers them to `ShellState` from the frame's poll
+//! to [`receive_from_sender`]), and delivers them to `ShellState` from the frame's poll
 //! (`webview.rs::poll_at` → [`super::drain_page_messages`]).
 //!
 //! The same channel carries the page's own presentation (slice 20): the `browserx-*` meta
@@ -460,7 +460,7 @@ pub enum Sender {
     Unknown,
 }
 
-/// Which tab `origin` is, over the rail's tabs. Public for the frame-side callers and tests.
+/// Resolves a sender from the tab or tabs supplied by the shell.
 pub fn sender_of(origin: &str, tabs: &[crate::state::AppTab]) -> Sender {
     match tabs.iter().find(|tab| tab.id == origin) {
         Some(tab) if tab.kind == crate::state::TabKind::Web => Sender::App {
@@ -585,10 +585,14 @@ pub enum Refusal {
 /// One accepted message from the IPC thread, waiting for the next frame's poll.
 static PENDING: Mutex<Vec<PageMessage>> = Mutex::new(Vec::new());
 
-/// The IPC-facing entry (`webview.rs::platform`): one `window.ipc.postMessage` payload from the
-/// page behind `origin`. Never panics; the count it returns is for a log line.
+/// Simulates the IPC handler after resolving a tab from the test rail.
+#[cfg(test)]
 pub fn receive(origin: &str, tabs: &[crate::state::AppTab], message: &str) -> Outcome {
-    let sender = sender_of(origin, tabs);
+    receive_from_sender(sender_of(origin, tabs), message)
+}
+
+/// Handles a `window.ipc.postMessage` payload from the sender bound to its web view.
+pub fn receive_from_sender(sender: Sender, message: &str) -> Outcome {
     match parse(sender, message) {
         Ok(parsed) => enqueue(parsed),
         Err(refusal) => Outcome::Refused(refusal),

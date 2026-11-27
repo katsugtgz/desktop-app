@@ -34,8 +34,14 @@ use sha2::{Digest, Sha256};
 /// Only `http` and `https` URLs are fetched; everything else (and every relative or `data:`
 /// URL) keeps the letter avatar. Compared case-insensitively, ASCII-only.
 pub fn is_fetchable(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+    let bytes = url.as_bytes();
+    [b"http://".as_slice(), b"https://".as_slice()]
+        .into_iter()
+        .any(|scheme| {
+            bytes
+                .get(..scheme.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+        })
 }
 
 /// The most bytes one icon fetch may download. Past it the body is abandoned and the letter

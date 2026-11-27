@@ -12,7 +12,7 @@ use notification_center::{NotificationAction, Snooze};
 
 #[cfg(test)]
 pub use bridge::clear;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 pub use bridge::receive;
 pub use bridge::INIT_SCRIPT;
 #[cfg(test)]

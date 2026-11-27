@@ -280,12 +280,11 @@ pub(crate) fn log_download(line: String) {
 
 /// What the shell asks of whatever renders an app's page.
 pub trait WebviewHost {
-    /// Create the page for `tab_id` at `url` with `environment` (UA and profile), filling `rect`
+    /// Create the page for `tab` with `environment` (UA and profile), filling `rect`
     /// (points), hidden.
     fn attach(
         &mut self,
-        tab_id: &str,
-        url: &str,
+        tab: &AppTab,
         environment: &PageEnvironment,
         rect: PaneRect,
     ) -> Result<(), WebviewError>;
@@ -459,7 +458,6 @@ pub fn poll(state: &mut ShellState, clock: f64, _tx: &mut rune::Tx) -> bool {
 /// `poll` without Rune's transaction: the seam tests drive frames and time themselves.
 pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     tick(clock);
-    publish_tabs(state);
     adopt_live_scale();
     let mut changed = surface_page_error(state);
     changed |= route_requests(state, clock);
@@ -527,27 +525,6 @@ fn adopt_live_scale() {
             let _ = engine.host.set_bounds(&tab, bounds);
         }
     });
-}
-
-/// The rail's tabs as the IPC thread may read them: published on every frame by `poll_at`, so
-/// `attach`'s ipc handler can tell which tab id sent a message without borrowing the
-/// `ShellState` (which is not `Sync`). `sync`'s attaches read the same snapshot after it.
-fn publish_tabs(state: &ShellState) {
-    let tabs: Vec<crate::state::AppTab> = state.tabs().to_vec();
-    TAB_SNAPSHOT.with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::new(tabs)));
-}
-
-/// The most recent tab list, for the web-view thread. Empty before the first frame.
-fn tab_snapshot() -> std::rc::Rc<Vec<crate::state::AppTab>> {
-    TAB_SNAPSHOT
-        .with(|slot| slot.borrow().clone())
-        .unwrap_or_else(|| std::rc::Rc::new(Vec::new()))
-}
-
-thread_local! {
-    /// The last polled rail tabs, shared with the attach path's ipc handler on this thread.
-    static TAB_SNAPSHOT: RefCell<Option<std::rc::Rc<Vec<crate::state::AppTab>>>> =
-        const { RefCell::new(None) };
 }
 
 /// Sets the clock retry backoff and log throttling read (seconds since the app started).
@@ -885,10 +862,7 @@ pub fn sync(state: &ShellState, rect: Option<PaneRect>, scale: f32) {
         }
         evict_for_capacity(engine, &active.id);
         let environment = PageEnvironment::for_tab(active);
-        match engine
-            .host
-            .attach(&active.id, &active.url, &environment, rect)
-        {
+        match engine.host.attach(active, &environment, rect) {
             Ok(()) => {
                 engine.session.bounds.insert(active.id.clone(), rect);
                 engine.session.failures.remove(&active.id);
@@ -1194,19 +1168,18 @@ mod platform {
     impl WebviewHost for WryWebview {
         fn attach(
             &mut self,
-            tab_id: &str,
-            url: &str,
+            tab: &AppTab,
             environment: &PageEnvironment,
             rect: PaneRect,
         ) -> Result<(), WebviewError> {
+            let tab_id = tab.id.as_str();
             if self.views.contains_key(tab_id) {
                 return Ok(());
             }
             let origin = tab_id.to_owned();
-            // The frame's poll publishes which tabs exist (the IPC thread cannot borrow the
-            // `ShellState`, which is not `Sync`): a snapshot the handler can consult.
-            let tabs_at_attach = tab_snapshot();
-            let ipc_origin = origin.clone();
+            // `sync` attaches only web tabs. Bind IPC to that tab's identity here so page
+            // messages don't consult or retain the rail, or supply their own sender.
+            let sender = crate::notifications::bridge::sender_of(tab_id, std::slice::from_ref(tab));
             let bounds = self.rect(rect);
             let profile_key = environment.profile.directory_name();
             let directory = profile_dir(&profile_root(), &environment.profile);
@@ -1218,7 +1191,7 @@ mod platform {
                 // Electron's session UA (or the manifest's `bx_override_user_agent`). Fixed for
                 // this web view; nothing a page sends can change it.
                 .with_user_agent(environment.user_agent.clone())
-                .with_url(url)
+                .with_url(tab.url.as_str())
                 // The page's core bridge plus optional per-site script selected by the manifest's
                 // `bx_legacy_service_id` (`site_scripts::combined_init_script`). Messages come back
                 // through wry's ipc (`window.ipc.postMessage`) with the tab as origin.
@@ -1228,7 +1201,10 @@ mod platform {
                 .with_ipc_handler(move |request| {
                     // `request.body()` is the page's string. The bridge owns every limit, drops
                     // what a source at its cap sends, and never panics on page input.
-                    crate::notifications::receive(&ipc_origin, &tabs_at_attach, request.body());
+                    crate::notifications::bridge::receive_from_sender(
+                        sender.clone(),
+                        request.body(),
+                    );
                 })
                 // A page's `window.open`/`target=_blank` never becomes an OS window: queue it for
                 // the next frame to route (to one of our tabs, or the default browser).
@@ -1382,8 +1358,7 @@ mod platform {
     impl WebviewHost for WryWebview {
         fn attach(
             &mut self,
-            _: &str,
-            _: &str,
+            _: &AppTab,
             _: &PageEnvironment,
             _: PaneRect,
         ) -> Result<(), WebviewError> {
@@ -1632,11 +1607,11 @@ pub mod fake {
     impl WebviewHost for FakeWebview {
         fn attach(
             &mut self,
-            tab_id: &str,
-            url: &str,
+            tab: &AppTab,
             environment: &PageEnvironment,
             rect: PaneRect,
         ) -> Result<(), WebviewError> {
+            let tab_id = tab.id.as_str();
             self.attempts += 1;
             if self.refuse_attach || self.attempts <= self.fail_first {
                 self.log.events.borrow_mut().push(Event::AttachFailed {
@@ -1653,7 +1628,7 @@ pub mod fake {
             });
             self.log.events.borrow_mut().push(Event::Attach {
                 tab: tab_id.to_owned(),
-                url: url.to_owned(),
+                url: tab.url.clone(),
                 rect,
             });
             Ok(())

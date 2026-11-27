@@ -1532,9 +1532,8 @@ impl ShellState {
         &self.results
     }
 
-    /// Queues the fetch for every app the shell can draw an icon for (the rail's tabs, live page
-    /// favicons, and the store's lists). Called from the frame poll — the view never mutates
-    /// state, so the asking happens here; once per URL per run.
+    /// Queues icons for the rail and the lists the shell is drawing. The frame poll owns the
+    /// requests so view construction can stay read-only.
     pub fn prefetch_icons(&mut self) {
         for tab in &self.tabs {
             if let Some(favicon) = tab.page_favicon.as_deref() {
@@ -1542,41 +1541,43 @@ impl ShellState {
             }
             self.icons.pixels(&tab.icon);
         }
-        // The notification panel's rows, only while it is the surface (slice 16). The panel
-        // module owns which rows are drawn and the per-frame bound
-        // (`MAX_NOTIFICATION_ICON_URLS`); this is the one ask path, the store dedupes.
-        //
-        // Before the store's lists: [`crate::icons::MAX_INFLIGHT`] is a drop-not-defer queue,
-        // and a cold store asks for every listable app's icon at once. What the user is looking
-        // at (the panel) must not lose its asks to off-screen store tiles; the store's own
-        // bound already drops its tail on a cold frame and asks it on the next poll.
+        // Request the panel's icons first so its rows have priority over the store behind it.
         if self.surface == Surface::Notifications {
             for url in crate::notifications::icon_urls(&self.notifications) {
                 self.icons.pixels(&url);
             }
         }
-        for url in self.store_list_icon_urls() {
-            self.icons.pixels(&url);
+        if !matches!(self.surface, Surface::Apps | Surface::Notifications)
+            || !self.active().renders_in_rune()
+        {
+            return;
         }
-    }
 
-    /// The icon URLs the store's cached lists and current results draw.
-    fn store_list_icon_urls(&self) -> Vec<String> {
-        let mut urls: Vec<String> = Vec::new();
-        urls.extend(
-            self.popular
-                .cream_of_the_crop_apps
-                .iter()
-                .map(|a| a.icon_url.clone()),
-        );
-        urls.extend(self.popular.runner_ups.iter().map(|a| a.icon_url.clone()));
-        urls.extend(self.popular.noteworthy.iter().map(|a| a.icon_url.clone()));
-        for (_, category) in &self.categories {
-            urls.extend(category.iter().map(|a| a.icon_url.clone()));
+        let searching = !self.query().trim().is_empty();
+        let icons = &mut self.icons;
+        let mut request = |apps: &[MinimalApplication]| {
+            for app in apps {
+                icons.pixels(&app.icon_url);
+            }
+        };
+        if searching {
+            request(&self.results);
+            return;
         }
-        urls.extend(self.custom.iter().map(|a| a.icon_url.clone()));
-        urls.extend(self.results.iter().map(|a| a.icon_url.clone()));
-        urls
+        match self.section {
+            StoreSection::MostPopular => {
+                request(&self.popular.cream_of_the_crop_apps);
+                request(&self.popular.runner_ups);
+                request(&self.popular.noteworthy);
+            }
+            StoreSection::AllApps => {
+                for (_, apps) in &self.categories {
+                    request(apps);
+                }
+            }
+            StoreSection::MyCustomApps if self.custom_app_draft.is_none() => request(&self.custom),
+            StoreSection::MyCustomApps => {}
+        }
     }
 
     /// The pixels drawing `url`'s icon, or `None` — no icon, a URL the shell refuses, or a

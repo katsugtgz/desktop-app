@@ -13,7 +13,7 @@ use rune::{tok, Env, Runtime};
 
 use crate::icons::{self, Fetcher, IconError, Source, MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_INFLIGHT};
 use crate::shell;
-use crate::state::{AppTab, ShellState};
+use crate::state::{AppTab, ShellState, StoreSection};
 
 const WINDOW: (f32, f32) = (1200.0, 800.0);
 
@@ -369,6 +369,50 @@ fn cache_paths_are_content_addressed_and_escaped() {
 }
 
 // ---- The drawn views ---------------------------------------------------------------------------
+
+#[test]
+fn prefetch_only_requests_icons_for_the_visible_store_list() {
+    let mut state = ShellState::new(appstore_service::ApplicationService::for_tests(
+        "icons-visible-store-list",
+    ));
+    let popular = state.popular();
+    let popular_urls: std::collections::HashSet<_> = popular
+        .cream_of_the_crop_apps
+        .iter()
+        .chain(&popular.runner_ups)
+        .chain(&popular.noteworthy)
+        .map(|app| app.icon_url.as_str())
+        .collect();
+    let app = state
+        .categories()
+        .iter()
+        .flat_map(|(_, apps)| apps)
+        .find(|app| {
+            icons::is_fetchable(&app.icon_url) && !popular_urls.contains(app.icon_url.as_str())
+        })
+        .expect("an app listed only by category");
+    let category_url = app.icon_url.clone();
+    let rail_url = "https://example.test/rail.png";
+    state.tabs_mut_for_tests().push(AppTab::web_with_icon(
+        "test-tab",
+        "Test",
+        "https://example.test",
+        rail_url,
+    ));
+
+    state.prefetch_icons();
+    assert!(state.icon_pixels(rail_url).is_some());
+    assert!(state.icon_pixels(&category_url).is_none());
+
+    state.show_section(StoreSection::AllApps);
+    state.select("test-tab");
+    state.prefetch_icons();
+    assert!(state.icon_pixels(&category_url).is_none());
+
+    state.open_app_store();
+    state.prefetch_icons();
+    assert!(state.icon_pixels(&category_url).is_some());
+}
 
 #[test]
 fn the_rail_and_the_store_draw_the_icon_once_pixels_land() {
