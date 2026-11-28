@@ -96,6 +96,7 @@ fn full_state() -> SessionState {
         download_dir: Some("/tmp/station-downloads".to_owned()),
         include_beta_updates: true,
         minimize_to_tray: true,
+        password_autosave: true,
     }
 }
 
@@ -121,6 +122,7 @@ fn missing_file_is_a_default_session() {
     assert!(state.installed.is_empty());
     assert!(state.dock.is_empty());
     assert!(state.tabs.is_empty());
+    assert!(!state.password_autosave);
 }
 
 #[test]

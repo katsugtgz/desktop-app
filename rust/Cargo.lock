@@ -3872,8 +3872,13 @@ name = "session-store"
 version = "0.1.0"
 dependencies = [
  "appstore-service",
+ "manifest-registry",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -4294,6 +4299,8 @@ dependencies = [
  "ureq",
  "url",
  "url-router",
+ "webview2-com",
+ "windows-core",
  "windows-sys 0.59.0",
  "wry",
 ]

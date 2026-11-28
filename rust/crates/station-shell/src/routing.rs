@@ -9,7 +9,8 @@
 use std::cell::RefCell;
 use std::sync::Mutex;
 
-use url_router::{InstalledApp, OpenTab, Origin, Route, RouteRequest};
+use manifest_registry::{get_bx_app_manifest_url, list_all_applications, Manifest};
+use url_router::{InstalledApp, OpenTab, Origin, Route, RouteRequest, StoreApp};
 
 /// What the shell will do with a requested URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum Routed {
     FocusAndLoad { tab_id: String, url: String },
     /// Navigate an app's tab (it may not be open yet) and bring it forward.
     Load { tab_id: String, url: String },
+    /// Install the matched app, then open the link in its tab after the user chooses it.
+    InstallAndOpen { manifest_url: String, url: String },
     /// Hand the URL to the OS default browser. Never a second web view.
     External,
 }
@@ -164,6 +167,27 @@ pub fn current_waker() -> Option<rune::Waker> {
     WAKER.with(|slot| slot.borrow().clone())
 }
 
+/// Catalog entries whose pages can open in the shell after an explicit install.
+pub(crate) fn installable_catalog(private: &[Manifest]) -> Vec<StoreApp> {
+    list_all_applications(private)
+        .into_iter()
+        .filter(|app| {
+            app.inner.bx_no_dock != Some(true)
+                && app
+                    .inner
+                    .start_url
+                    .as_deref()
+                    .is_some_and(|url| url.starts_with("https://") || url.starts_with("http://"))
+        })
+        .map(|app| StoreApp {
+            manifest_url: get_bx_app_manifest_url(&app.id),
+            scope: app.inner.scope,
+            extended_scopes: app.inner.extended_scopes,
+            opted_out: false,
+        })
+        .collect()
+}
+
 /// The decision for `url`, from the request's origin tab: which tab shows it, or the OS browser.
 ///
 /// The mapping from [`url_router`]'s actions to the shell's one-tab-per-app model:
@@ -171,15 +195,16 @@ pub fn current_waker() -> Option<rune::Waker> {
 /// - push-and-focus or the origin app's own scope → show that app and load the URL in its page;
 /// - a new tab or instance of an installed app → that app's tab loads the URL (the shell has no
 ///   per-app second tab yet);
-/// - install-and-open (the app is not installed) and anything unmatched → the OS browser. The
-///   shell does not install from a link.
+/// - install-and-open → a catalog choice, supplied only for an explicit user action;
+/// - anything unmatched → the OS browser.
 pub fn decide(
     url: &str,
     apps: &[InstalledApp],
     tabs: &[OpenTab],
     origin_tab: Option<&str>,
+    catalog: &[StoreApp],
 ) -> Routed {
-    let mut request = RouteRequest::new(url, apps, tabs);
+    let mut request = RouteRequest::new(url, apps, tabs).with_store_apps(catalog);
     if let Some(origin) = origin_tab {
         let application_id = tabs
             .iter()
@@ -218,7 +243,8 @@ pub fn decide(
                 tab_id: tab.tab_id.clone(),
                 url,
             }),
-        Route::InstallAndOpen { .. } | Route::ExternalBrowser => Routed::External,
+        Route::InstallAndOpen { manifest_url, url } => Routed::InstallAndOpen { manifest_url, url },
+        Route::ExternalBrowser => Routed::External,
     }
 }
 

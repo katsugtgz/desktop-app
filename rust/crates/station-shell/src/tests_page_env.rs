@@ -78,6 +78,30 @@ fn seeded_session(path: &Path, application_id: &str) {
         .expect("seed the session");
 }
 
+#[test]
+fn password_saving_is_opt_in_and_applies_while_settings_are_open() {
+    let path = session_path("password-autosave");
+    let mut state = ShellState::launch_in(
+        ApplicationService::for_tests(&tag("password-autosave")),
+        &path,
+    );
+    let log = install_recording_host();
+    state.open_settings();
+    webview::sync(&state, None, 1.0);
+    assert!(!log.password_autosave());
+
+    state.toggle_password_autosave();
+    webview::sync(&state, None, 1.0);
+    assert!(log.password_autosave());
+    assert!(SessionStore::new(&path).load().unwrap().password_autosave);
+
+    state.toggle_password_autosave();
+    webview::sync(&state, None, 1.0);
+    assert!(!log.password_autosave());
+    assert!(!SessionStore::new(&path).load().unwrap().password_autosave);
+    std::fs::remove_file(path).unwrap();
+}
+
 // ---- User agent -------------------------------------------------------------------------
 
 #[test]

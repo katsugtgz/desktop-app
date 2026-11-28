@@ -52,6 +52,18 @@ rail's app row, Settings and the notification panel (Escape or a second press re
 painted is not observed — no screenshot was taken. The App Store installs apps into the rail; a
 store tile on an installed app uninstalls it, and Settings can also uninstall.
 
+### Local browser extensions on Windows
+
+Open an app page and go to **Settings → Browser extensions → Manage**. Choose the full path of a
+trusted unpacked extension folder containing `manifest.json`, then select **Install unpacked
+extension**. Reload the app page to apply the extension to existing pages. The extension stays in
+that WebView2 profile across restarts, so keep its source folder in place. From the same app's
+Settings card, select **Refresh** to list the installed extensions and **Remove** to uninstall one.
+
+Apps that use the shared WebView2 profile share its extensions. This supports local unpacked
+extensions through WebView2. Extensions that require a browser toolbar or popup have no such
+entry point inside Station.
+
 ## Data
 
 | What | Where |
@@ -202,6 +214,6 @@ What works and what does not, kept honest (updated through Slice 36, 2026-11-26)
 - **CI, packaging & remaining product decisions**: `.github/workflows/rust.yml` runs build/clippy/test
   on both `ubuntu-latest` and `windows-2025` (slice 36); `rust/packaging/installer.nsi` (per-user
   HKCU NSIS installer with WebView2 bootstrapper and `station://` registration) is built and locally
-  smoked; clean-VM verification, code signing identity, and product decisions on Chrome extensions,
-  password managers, SDK runtime apps, and full staged auto-updater remain human-gated before
-  Electron deletion (`P6–P8`).
+  smoked. Release acceptance still needs clean-VM verification, a signed installer, and a live
+  Google sign-in. Chrome Store distribution, external password manager and SDK runtimes, and
+  staged updates remain separate parity work.

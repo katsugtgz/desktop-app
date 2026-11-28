@@ -96,4 +96,15 @@ Append one entry per run. Prune entries older than 30 days.
 - Verification: `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` 0 warnings across all 13 crates; `cargo check -p station-shell --target x86_64-pc-windows-gnu` 0 warnings in `station-shell`; `cargo test --workspace` **605 passed / 0 failed / 1 ignored** (`station-shell` 278, `session-store` 41); real Google Chrome CDP JS verification (`INIT_SCRIPT`, `CHROME_COMPAT_SCRIPT`, favicon observer, all 7 site scripts) **PASS**; Rune `--snap` (lavapipe) rendered and visually inspected for `settings`, `about`, `custom-app`, and `downloads`.
 - Outcome: draft-pr-open (pushed `feat/full-rust-port` and opened draft PR targeting `main`; awaiting CI & Windows host sign-off before human merge).
 
+## 2026-11-28 — Native upgrade and feature follow-up
 
+- Ran independent implementation worktrees and verifier reviews for legacy import, pasted link
+  routing, first-run app selection, and WebView2 extensions. Added a Windows password-saving
+  preference and reviewed it with the native integration.
+- Added a first-run import hint and tested that Slack workspace links retain their subdomain
+  after relaunch. See `STATE.md` and `README.md` for the scope and usage.
+- Formatting and Linux workspace Clippy passed. The workspace suite reported 626 passed, 0 failed,
+  and 1 ignored. Windows x64 GNU Clippy passed for all shell targets. The built import CLI passed an
+  end-to-end check against a synthetic Electron database, including a refused repeat import.
+- Changes were integrated locally on `feat/full-rust-port`. Windows runtime, installer signing,
+  and live Google authentication remain open.

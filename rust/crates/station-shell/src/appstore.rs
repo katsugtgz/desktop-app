@@ -22,6 +22,9 @@ const COLUMNS: usize = 4;
 
 /// The store's pane: sidebar beside the selected list, filling the shell's content box.
 pub fn view(state: &ShellState, p: Paint) -> El {
+    if let Some(onboarding) = state.onboarding() {
+        return crate::onboarding::view(state, onboarding, p);
+    }
     col()
         .key("content")
         .grow(1.0)
@@ -79,7 +82,7 @@ fn sidebar(state: &ShellState, p: Paint) -> El {
     column.child(rune::spacer())
 }
 
-fn search_field(state: &ShellState, p: Paint) -> El {
+pub(crate) fn search_field(state: &ShellState, p: Paint) -> El {
     el().key("store-search-box")
         .w_full()
         .h(30.0)

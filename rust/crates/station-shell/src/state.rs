@@ -21,8 +21,10 @@ use session_store::{
     AppConfigEntry, Identity, SessionState, SessionStore, ThemePreference, WindowState,
 };
 use tab_model::{Badge, TabAction, TabModel};
-use url_router::{InstalledApp, OpenTab};
+use url_router::{InstalledApp, OpenTab, StoreApp};
 
+use crate::onboarding::Onboarding;
+use crate::routing::{self, Routed};
 use crate::session;
 
 /// What the content area shows instead of the active app's page.
@@ -272,12 +274,15 @@ pub struct ShellState {
     active: String,
     /// The manifest store's private applications, as the store queries want them.
     private: Vec<Manifest>,
+    /// Catalog scopes for links submitted through the Quick Switcher.
+    routing_catalog: Vec<StoreApp>,
     custom: Vec<MinimalApplication>,
     popular: PopularApps,
     categories: Vec<(String, Vec<MinimalApplication>)>,
     section: StoreSection,
     search: TextEdit,
     results: Vec<MinimalApplication>,
+    onboarding: Option<Onboarding>,
     theme: ThemePreference,
     /// The login item's last known registry state (Windows `HKCU\…\Run\Station`): refreshed
     /// from the registry on a real launch, written with the session after a successful toggle.
@@ -287,6 +292,7 @@ pub struct ShellState {
     start_at_login_error: Option<String>,
     /// Whether closing the main window hides Station to the Windows system tray (Slice 35).
     minimize_to_tray: bool,
+    password_autosave: bool,
     surface: Surface,
     page_error: Option<PageError>,
     /// Failed writes since the last success: logged at most every [`SAVE_LOG_EVERY_S`].
@@ -317,6 +323,7 @@ pub struct ShellState {
     /// The configuration editor's draft, while Settings shows an app's editor (`None` otherwise;
     /// leaving Settings drops it). `TextEdit` is the field widget; its text is the value.
     config_draft: Option<ConfigDraft>,
+    pub(crate) extensions: crate::extensions::Manager,
     /// Metadata and update-check state for the About Station surface (`about-window` crate).
     about_state: about_window::AboutWindowState,
     /// Persisted preference for including prerelease (beta) GitHub releases (Slice 34).
@@ -447,6 +454,7 @@ impl ShellState {
             store,
             tabs: Vec::new(),
             active: APP_STORE_ID.to_owned(),
+            routing_catalog: routing::installable_catalog(&private),
             private,
             custom,
             popular,
@@ -454,10 +462,12 @@ impl ShellState {
             section: StoreSection::default(),
             search: TextEdit::new(""),
             results: Vec::new(),
+            onboarding: None,
             theme: ThemePreference::System,
             start_at_login: false,
             start_at_login_error: None,
             minimize_to_tray: false,
+            password_autosave: false,
             surface: Surface::Apps,
             page_error: None,
             save_failures: 0,
@@ -470,6 +480,7 @@ impl ShellState {
             rail_order: Vec::new(),
             icons: crate::icons::IconStore::new(),
             config_draft: None,
+            extensions: crate::extensions::Manager::default(),
             about_state: about_window::AboutWindowState::default(),
             include_beta_updates: false,
             update_url: None,
@@ -555,6 +566,7 @@ impl ShellState {
         state.theme = theme;
         state.start_at_login = stored.start_at_login;
         state.minimize_to_tray = minimize_to_tray;
+        state.password_autosave = stored.password_autosave;
         state.include_beta_updates = include_beta_updates;
         state
             .about_state
@@ -891,12 +903,17 @@ impl ShellState {
         frecency_id: &str,
         action: crate::quick_switch::QuickSwitchAction,
     ) {
-        let query = self.quick_switch.query().to_owned();
-        self.frecency.save(activity::frecency::SaveParams {
-            search_query: (!query.is_empty()).then_some(query.as_str()),
-            selected_id: frecency_id,
-            date_selection: None,
-        });
+        if !matches!(
+            action,
+            crate::quick_switch::QuickSwitchAction::OpenLink { .. }
+        ) {
+            let query = self.quick_switch.query();
+            self.frecency.save(activity::frecency::SaveParams {
+                search_query: (!query.is_empty()).then_some(query),
+                selected_id: frecency_id,
+                date_selection: None,
+            });
+        }
         match action {
             crate::quick_switch::QuickSwitchAction::OpenFavorite {
                 favorite_id: _,
@@ -904,9 +921,10 @@ impl ShellState {
                 url,
             } => {
                 self.close_overlay();
-                self.select(&application_id);
-                if !url.is_empty() && self.tab_url(&application_id) != Some(url.as_str()) {
-                    crate::webview::load_if_attached(&application_id, &url);
+                if url.is_empty() {
+                    self.select(&application_id);
+                } else {
+                    self.open_routed_tab(&application_id, &url);
                 }
             }
             crate::quick_switch::QuickSwitchAction::SelectTab { tab_id } => {
@@ -930,6 +948,65 @@ impl ShellState {
             crate::quick_switch::QuickSwitchAction::InstallApp { manifest_url } => {
                 self.close_overlay();
                 self.install(&manifest_url);
+            }
+            crate::quick_switch::QuickSwitchAction::OpenLink { url, route } => {
+                self.close_overlay();
+                self.open_quick_link(&url, route);
+                self.quick_switch.reset();
+            }
+        }
+    }
+
+    /// Resolves a link entered in the Quick Switcher against open tabs and installable apps.
+    pub(crate) fn route_quick_link(&self, url: &str) -> Routed {
+        let route = routing::decide(
+            url,
+            &self.routing_apps(),
+            &self.routing_tabs(),
+            None,
+            &self.routing_catalog,
+        );
+        match route {
+            Routed::InstallAndOpen {
+                ref manifest_url, ..
+            } if self.is_installed(manifest_url) => Routed::External,
+            route => route,
+        }
+    }
+
+    pub(crate) fn install_link_label(&self, manifest_url: &str) -> String {
+        self.label_for(manifest_url, "app")
+    }
+
+    fn open_quick_link(&mut self, original_url: &str, route: Routed) {
+        match route {
+            Routed::Ignore | Routed::External => routing::open_external(original_url),
+            Routed::Focus { tab_id } => {
+                self.select(&tab_id);
+            }
+            Routed::FocusAndLoad { tab_id, url } | Routed::Load { tab_id, url } => {
+                self.open_routed_tab(&tab_id, &url);
+            }
+            Routed::InstallAndOpen { manifest_url, url } => {
+                let subdomain = self
+                    .store
+                    .get_manifest_by_url(&manifest_url)
+                    .and_then(|manifest| link_subdomain(&manifest.inner, &url));
+                let options = InstallOptions {
+                    config_data: ApplicationConfigData {
+                        subdomain,
+                        ..ApplicationConfigData::default()
+                    },
+                    ..InstallOptions::default()
+                };
+                if !self.is_installed(&manifest_url)
+                    && self.install_with_options(&manifest_url, &options)
+                {
+                    let tab_id = self.active().id.clone();
+                    self.open_routed_tab(&tab_id, &url);
+                } else {
+                    routing::open_external(original_url);
+                }
             }
         }
     }
@@ -1094,22 +1171,26 @@ impl ShellState {
     /// Installs the application whose manifest `manifest_url` names, adds its rail row, selects
     /// it and writes the session. False when the manifest is unknown or the install failed.
     pub fn install(&mut self, manifest_url: &str) -> bool {
-        let installed = match self.store.install(manifest_url, &InstallOptions::default()) {
-            Ok(installed) => installed,
-            Err(_) => return false,
+        self.install_with_options(manifest_url, &InstallOptions::default())
+    }
+
+    fn install_with_options(&mut self, manifest_url: &str, options: &InstallOptions) -> bool {
+        let Some(application_id) = self.install_record(manifest_url, options) else {
+            return false;
         };
         self.rebuild_tabs();
         // A `bx_no_dock` install is remembered but has no rail row to select; the App Store stays
         // the visible tab, which is what a dock-less application would do.
-        if self
-            .tabs
-            .iter()
-            .any(|tab| tab.id == installed.application_id)
-        {
-            self.active = installed.application_id;
-        }
+        self.set_active(&application_id);
         self.persist();
         true
+    }
+
+    fn install_record(&mut self, manifest_url: &str, options: &InstallOptions) -> Option<String> {
+        self.store
+            .install(manifest_url, options)
+            .ok()
+            .map(|installed| installed.application_id)
     }
 
     /// Removes the installed application and its rail row. The caller closes its page with
@@ -1150,6 +1231,95 @@ impl ShellState {
     /// Whether an application installed from `manifest_url` is in the rail: the tile's marker.
     pub fn is_installed(&self, manifest_url: &str) -> bool {
         self.installed_application_id(manifest_url).is_some()
+    }
+
+    /// A missing session marks a first launch. A skip writes a session, so returning users and
+    /// users with an older or unreadable session keep their usual launch behavior.
+    pub fn start_onboarding_if_fresh(&mut self, legacy_data_found: bool) {
+        if self.session_is_missing() {
+            self.start_onboarding(legacy_data_found);
+        }
+    }
+
+    fn session_is_missing(&self) -> bool {
+        self.session.as_ref().is_some_and(|path| {
+            std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
+    }
+
+    pub fn start_onboarding(&mut self, legacy_data_found: bool) {
+        self.set_active(APP_STORE_ID);
+        self.onboarding = Some(Onboarding {
+            legacy_data_found,
+            ..Onboarding::default()
+        });
+    }
+
+    pub fn onboarding(&self) -> Option<&Onboarding> {
+        self.onboarding.as_ref()
+    }
+
+    pub fn toggle_onboarding_app(&mut self, app: &MinimalApplication) {
+        if app.is_chrome_extension {
+            return;
+        }
+        if let Some(onboarding) = &mut self.onboarding {
+            onboarding.toggle(app);
+        }
+    }
+
+    pub fn skip_onboarding(&mut self) -> bool {
+        if self.onboarding.take().is_none() {
+            return false;
+        }
+        self.clear_store_search();
+        self.persist();
+        true
+    }
+
+    pub fn install_onboarding_apps(&mut self) {
+        let Some(mut onboarding) = self.onboarding.take() else {
+            return;
+        };
+        if onboarding.selected.is_empty() {
+            self.onboarding = Some(onboarding);
+            return;
+        }
+
+        onboarding.selected.retain(|app| {
+            let url = &app.bx_app_manifest_url;
+            match self
+                .installed_application_id(url)
+                .or_else(|| self.install_record(url, &InstallOptions::default()))
+            {
+                Some(application_id) => {
+                    if onboarding.first_installed.is_none()
+                        && self.store.dock().contains(&application_id)
+                    {
+                        onboarding.first_installed = Some(application_id);
+                    }
+                    false
+                }
+                None => true,
+            }
+        });
+        self.rebuild_tabs();
+        if onboarding.selected.is_empty() {
+            if let Some(application_id) = &onboarding.first_installed {
+                self.set_active(application_id);
+            }
+            self.clear_store_search();
+        } else {
+            onboarding.install_failed = true;
+            self.onboarding = Some(onboarding);
+        }
+        self.persist();
+    }
+
+    fn clear_store_search(&mut self) {
+        self.search = TextEdit::new("");
+        self.results.clear();
     }
 
     /// An installed application's stored configuration (empty when not configured, or when the
@@ -1497,6 +1667,7 @@ impl ShellState {
             .iter()
             .map(manifest_to_minimal_application)
             .collect();
+        self.routing_catalog = routing::installable_catalog(&private);
         self.private = private;
         self.popular = popular;
         self.categories = categories;
@@ -1667,6 +1838,14 @@ impl ShellState {
             }
             None => false,
         }
+    }
+
+    /// Opens a routed URL in its tab, attached or still waiting for the next frame.
+    pub(crate) fn open_routed_tab(&mut self, tab_id: &str, url: &str) -> bool {
+        self.retarget(tab_id, url);
+        let changed = self.select(tab_id);
+        crate::webview::load_if_attached(tab_id, url);
+        changed
     }
 
     /// A page's own `document.title` for its tab (slice 20). The bridge already trimmed and
@@ -1963,6 +2142,15 @@ impl ShellState {
     /// Toggles minimize-to-tray from the Settings -> General switch.
     pub(crate) fn toggle_minimize_to_tray(&mut self) {
         self.set_minimize_to_tray(!self.minimize_to_tray);
+    }
+
+    pub fn password_autosave(&self) -> bool {
+        self.password_autosave
+    }
+
+    pub(crate) fn toggle_password_autosave(&mut self) {
+        self.password_autosave = !self.password_autosave;
+        self.persist();
     }
 
     /// Active and recent downloads displayed in the bottom Rune downloads bar (Slice 33).
@@ -2496,6 +2684,11 @@ impl ShellState {
     /// read is not overwritten until the user acts; a write failure is reported and the shell
     /// keeps running.
     pub fn save(&mut self) {
+        // Closing an untouched first-run picker leaves the native session free for a later
+        // import. Choosing Skip or Install writes the session immediately through their actions.
+        if self.onboarding.is_some() && self.session_is_missing() {
+            return;
+        }
         self.write_session();
     }
 
@@ -2642,6 +2835,7 @@ impl ShellState {
             download_dir: self.download_dir.clone(),
             include_beta_updates: self.include_beta_updates,
             minimize_to_tray: self.minimize_to_tray,
+            password_autosave: self.password_autosave,
         }
     }
 }
@@ -2676,6 +2870,29 @@ fn config_field_for(manifest: &manifest_registry::BxAppManifest) -> Option<Confi
     } else {
         None
     }
+}
+
+/// A routed workspace URL can configure a manifest's subdomain preset at install time.
+fn link_subdomain(manifest: &manifest_registry::BxAppManifest, url: &str) -> Option<String> {
+    if config_field_for(manifest) != Some(ConfigField::Subdomain) {
+        return None;
+    }
+    let suffix = manifest
+        .bx_multi_instance_config
+        .as_ref()?
+        .subdomain_ui_suffix
+        .as_deref()
+        .filter(|suffix| suffix.starts_with('.'))?;
+    let url = url::Url::parse(url).ok()?;
+    let label = url.host_str()?.strip_suffix(suffix)?;
+    let valid = !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    valid.then(|| label.to_owned())
 }
 
 /// The session entry as the service's `set_config_data` takes it (the same three fields).

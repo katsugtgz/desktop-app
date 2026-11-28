@@ -302,12 +302,23 @@ pub trait WebviewHost {
     fn reload(&mut self, tab_id: &str) -> Result<(), WebviewError>;
     /// Apply a zoom scale factor (`0.5..=3.0`) to an attached page.
     fn set_zoom(&mut self, tab_id: &str, factor: f64) -> Result<(), WebviewError>;
+    /// Set the preference for current and future pages.
+    fn set_password_autosave(&mut self, _: bool) {}
     /// The window's scale changed: later bounds are converted with it.
     fn set_scale(&mut self, scale: f32);
     /// Show or hide an attached page without destroying it.
     fn set_visible(&mut self, tab_id: &str, visible: bool);
     /// Destroy an attached page.
     fn detach(&mut self, tab_id: &str);
+    /// Run an explicit extension-management request in the attached page's profile.
+    fn request_extensions(
+        &self,
+        _tab_id: &str,
+        _request: crate::extensions::Request,
+        reply: crate::extensions::Reply,
+    ) {
+        reply.send(Err("Browser extensions require WebView2.".to_owned()));
+    }
 }
 
 /// How many attach attempts a tab gets before the shell stops retrying by itself: the first try
@@ -445,6 +456,7 @@ pub fn after_frame(rt: &Runtime<ShellState>) {
 pub fn setup(state: &mut ShellState, waker: rune::Waker) {
     crate::routing::remember_waker(waker.clone());
     crate::downloads::remember_waker(waker.clone());
+    state.extensions.set_waker(waker.clone());
     state.start_icons(waker);
 }
 
@@ -477,9 +489,26 @@ pub fn poll_at(state: &mut ShellState, clock: f64) -> bool {
     changed |= state.apply_download_events(crate::downloads::drain_events());
     changed |= state.poll_oauth();
     changed |= state.poll_updates();
+    changed |= state.extensions.poll();
     state.prefetch_icons();
     changed |= state.drain_icons();
     changed
+}
+
+pub(crate) fn request_extensions(
+    tab_id: &str,
+    request: crate::extensions::Request,
+    reply: crate::extensions::Reply,
+) {
+    ENGINE.with(|engine| {
+        if let Some(engine) = engine.borrow().as_ref() {
+            engine.host.request_extensions(tab_id, request, reply);
+        } else {
+            reply.send(Err(
+                "Open the app page before managing its extensions.".to_owned()
+            ));
+        }
+    });
 }
 
 /// Compares the window's live scale ([`platform::live_scale`], the frame poll's read of the
@@ -595,9 +624,10 @@ pub fn route_requests(state: &mut ShellState, now: f64) -> bool {
     let mut externals = 0;
     let mut opened: HashSet<String> = HashSet::new();
     for request in requests {
-        match crate::routing::decide(&request.url, &apps, &tabs, Some(&request.origin_tab)) {
+        // Only Quick Switcher submissions consult the installable catalog.
+        match crate::routing::decide(&request.url, &apps, &tabs, Some(&request.origin_tab), &[]) {
             crate::routing::Routed::Ignore => {}
-            crate::routing::Routed::External => {
+            crate::routing::Routed::External | crate::routing::Routed::InstallAndOpen { .. } => {
                 // A page can queue a flood of windows: cap the browsers one frame opens and open
                 // each distinct URL once.
                 if externals >= crate::routing::MAX_EXTERNAL_PER_FRAME
@@ -617,14 +647,7 @@ pub fn route_requests(state: &mut ShellState, now: f64) -> bool {
             }
             crate::routing::Routed::FocusAndLoad { tab_id, url }
             | crate::routing::Routed::Load { tab_id, url } => {
-                // The tab's own URL is what a page not yet open attaches with; an open page is
-                // navigated directly.
-                state.retarget(&tab_id, &url);
-                changed |= state.select(&tab_id);
-                // A page that is not open yet attaches with the retargeted URL on the next frame.
-                if is_attached(&tab_id) {
-                    load_in(&tab_id, &url);
-                }
+                changed |= state.open_routed_tab(&tab_id, &url);
             }
         }
     }
@@ -792,6 +815,7 @@ pub fn sync(state: &ShellState, rect: Option<PaneRect>, scale: f32) {
         if engine.closed {
             return;
         }
+        engine.host.set_password_autosave(state.password_autosave());
         // A display-scale change (another monitor, a DPI change) re-applies every page's bounds:
         // points are converted to pixels with the host's scale. The live DPI read is the
         // authority when the OS reports one — `adopt_live_scale` (frame poll) uses it too, so
@@ -1124,6 +1148,7 @@ mod platform {
         contexts: HashMap<String, wry::WebContext>,
         parent: ParentWindow,
         scale: f32,
+        password_autosave: bool,
     }
 
     #[cfg(target_os = "windows")]
@@ -1134,6 +1159,7 @@ mod platform {
                 contexts: HashMap::new(),
                 parent: ParentWindow(parent),
                 scale,
+                password_autosave: false,
             }
         }
 
@@ -1143,6 +1169,25 @@ mod platform {
                 position: wry::dpi::PhysicalPosition::new(pixels.x, pixels.y).into(),
                 size: wry::dpi::PhysicalSize::new(pixels.w, pixels.h).into(),
             }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn apply_password_autosave(view: &wry::WebView, enabled: bool) {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+        use windows_core::Interface;
+        use wry::WebViewExtWindows;
+
+        let apply = || -> windows_core::Result<()> {
+            // SAFETY: The controller belongs to this live view. All calls run on its UI thread.
+            unsafe {
+                let settings: ICoreWebView2Settings4 =
+                    view.controller().CoreWebView2()?.Settings()?.cast()?;
+                settings.SetIsPasswordAutosaveEnabled(enabled)
+            }
+        };
+        if let Err(error) = apply() {
+            eprintln!("station-shell: setting WebView2 password autosave failed: {error}");
         }
     }
 
@@ -1172,6 +1217,8 @@ mod platform {
             environment: &PageEnvironment,
             rect: PaneRect,
         ) -> Result<(), WebviewError> {
+            use wry::WebViewBuilderExtWindows;
+
             let tab_id = tab.id.as_str();
             if self.views.contains_key(tab_id) {
                 return Ok(());
@@ -1188,6 +1235,9 @@ mod platform {
                 .entry(profile_key)
                 .or_insert_with(|| wry::WebContext::new(Some(directory)));
             let view = wry::WebViewBuilder::new_with_web_context(context)
+                // Enable the profile API. AddBrowserExtension is called only from native Settings;
+                // Wry is never given a directory to scan or extensions to load on attachment.
+                .with_browser_extensions_enabled(true)
                 // Electron's session UA (or the manifest's `bx_override_user_agent`). Fixed for
                 // this web view; nothing a page sends can change it.
                 .with_user_agent(environment.user_agent.clone())
@@ -1245,8 +1295,24 @@ mod platform {
                 .with_focused(false)
                 .build_as_child(&self.parent)
                 .map_err(|why| WebviewError::Failed(format!("WebView2 for {tab_id}: {why}")))?;
+            apply_password_autosave(&view, self.password_autosave);
             self.views.insert(tab_id.to_owned(), view);
             Ok(())
+        }
+
+        fn request_extensions(
+            &self,
+            tab_id: &str,
+            request: crate::extensions::Request,
+            reply: crate::extensions::Reply,
+        ) {
+            if let Some(view) = self.views.get(tab_id) {
+                crate::extensions::request(view, request, reply);
+            } else {
+                reply.send(Err(
+                    "Open the app page before managing its extensions.".to_owned()
+                ));
+            }
         }
 
         fn set_bounds(&mut self, tab_id: &str, rect: PaneRect) -> Result<(), WebviewError> {
@@ -1303,6 +1369,16 @@ mod platform {
                 .ok_or_else(|| WebviewError::Failed(format!("no web view for {tab_id}")))?
                 .zoom(factor)
                 .map_err(|why| WebviewError::Failed(format!("zoom {tab_id}: {why}")))
+        }
+
+        fn set_password_autosave(&mut self, enabled: bool) {
+            if self.password_autosave == enabled {
+                return;
+            }
+            self.password_autosave = enabled;
+            for view in self.views.values() {
+                apply_password_autosave(view, enabled);
+            }
         }
 
         fn set_visible(&mut self, tab_id: &str, visible: bool) {
@@ -1451,6 +1527,7 @@ pub fn focus_window() {
 #[cfg(test)]
 pub mod fake {
     use super::*;
+    use std::cell::Cell;
     use std::rc::Rc;
 
     /// One call the shell made on a host.
@@ -1518,9 +1595,14 @@ pub mod fake {
     pub struct WebviewLog {
         events: Rc<RefCell<Vec<Event>>>,
         environments: Rc<RefCell<Vec<AttachEnvironment>>>,
+        password_autosave: Rc<Cell<bool>>,
     }
 
     impl WebviewLog {
+        pub fn password_autosave(&self) -> bool {
+            self.password_autosave.get()
+        }
+
         pub fn events(&self) -> Vec<Event> {
             self.events.borrow().clone()
         }
@@ -1605,6 +1687,10 @@ pub mod fake {
     }
 
     impl WebviewHost for FakeWebview {
+        fn set_password_autosave(&mut self, enabled: bool) {
+            self.log.password_autosave.set(enabled);
+        }
+
         fn attach(
             &mut self,
             tab: &AppTab,

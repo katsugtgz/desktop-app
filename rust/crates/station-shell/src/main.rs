@@ -17,12 +17,15 @@ mod crash;
 mod deep_link;
 mod dialogs;
 mod downloads;
+mod extensions;
 mod find;
 mod ico;
 mod icons;
 mod instance;
+mod legacy_import;
 mod notifications;
 mod oauth;
+mod onboarding;
 mod permissions;
 mod placeholder;
 #[cfg(target_os = "windows")]
@@ -148,6 +151,14 @@ pub(crate) fn handle_close(
 }
 
 fn main() {
+    if let Some(result) = legacy_import::run(std::env::args_os().skip(1)) {
+        if let Err(error) = result {
+            eprintln!("Station import failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // One shell per session: a second launch forwards its `station://` argument to the running
     // shell and exits before any window is asked for. Must precede Rune: a secondary never
     // opens the web view stack at all.
@@ -177,7 +188,12 @@ fn main() {
         setup: Some(|state, waker| {
             webview::setup(state, waker.clone());
             instance::start_primary(waker);
-            deep_link::open(state, &std::env::args_os().collect::<Vec<_>>());
+            let args: Vec<_> = std::env::args_os().collect();
+            if deep_link::open(state, &args) == deep_link::Outcome::None && !rune::is_headless() {
+                let legacy_data_found =
+                    legacy_import::default_database_path().is_some_and(|path| path.is_file());
+                state.start_onboarding_if_fresh(legacy_data_found);
+            }
         }),
         poll: Some(webview::poll),
         // Named states for snapshots: the surfaces the shell opens.
@@ -188,6 +204,7 @@ fn main() {
             ("quick-switch", |state| state.open_quick_switch()),
             ("custom-app", |state| state.open_custom_app_form()),
             ("downloads", |state| state.seed_downloads_scene()),
+            ("onboarding", |state| state.start_onboarding(false)),
         ],
         ..rune::AppSpec::new(
             "Station",
@@ -222,9 +239,7 @@ fn main() {
     #[cfg(target_os = "windows")]
     let _tray = tray::start(app.handle());
 
-    let headless_cli = std::env::args()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "--snap" | "--tree" | "--help" | "-h"));
+    let headless_cli = rune::is_headless();
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run())) {
         let msg = if let Some(s) = payload.downcast_ref::<&str>() {
             (*s).to_owned()

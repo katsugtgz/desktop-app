@@ -1,10 +1,29 @@
 # Loop State — My Project
 
-Last run: 2026-11-26 rust-rune-port — Slices 31–36 + Electron retirement (P6–P8) landed on `feat/full-rust-port`
+Last run: 2026-11-28 — Native upgrade and feature follow-up on `feat/full-rust-port`
+
+## Draft PR #2 follow-up
+
+- Old Station workspaces can import apps, rail order, favorites, open tab links, and supported
+  settings from a closed Electron SQLite database. The import preserves any existing native
+  session. Existing users sign in again, and legacy custom app names and icons still need a
+  separate import.
+- The first-run app picker supports batch install and shows import instructions when it finds
+  a legacy database. The Quick Switcher can open a pasted link, offer to install its catalog app,
+  or use the default browser. For workspace links such as Slack, it saves the app's subdomain
+  when the manifest declares the matching configuration.
+- Windows Settings manages trusted unpacked extensions in the current app's WebView2 profile
+  and offers opt-in password saving through WebView2.
+- The combined branch passed formatting, Linux workspace Clippy, all 626 workspace tests
+  (1 ignored), and Windows x64 GNU Clippy for all shell targets. A CLI smoke test checked
+  that import preserved a synthetic Electron database and refused to overwrite a native session.
+- Release acceptance still needs a signed installer, a clean Windows 10/11 install and runtime
+  pass, and production Google OAuth. Broader legacy parity still includes Chrome Store
+  distribution, external password manager and SDK integrations, and multi-tab restoration.
 
 ## High Priority (loop is acting or waiting on human)
 
-0. **[DONE — draft PR open on `feat/full-rust-port`, awaiting CI & Windows host sign-off]** Baseline fixes + Slices 23–36 + Electron retirement (P6–P8):
+0. **[DONE — draft PR open on `feat/full-rust-port`, baseline CI passed]** Baseline fixes + Slices 23–36 + Electron retirement (P6–P8):
    - **Baseline fixes (`24e07c5`)**: Fixed fatal JS `SyntaxError` in `notifications/bridge.rs` (`INIT_SCRIPT`, caught live via `agent-browser` in real Chrome), fixed `downloads.rs` compound-extension Windows reserved device name check (`NUL.tar.gz`), finished P0 icon decoupling (`platform_icon.rs` / `tests_tray.rs` → `rust/assets/station.ico`, verified 0 non-comment `packages/` refs across `rust/crates/`), fixed POSIX test portability, and enabled `napi` `"dyn-symbols"` in `station-bridge/Cargo.toml` so `cargo test --workspace` AND `cargo clippy --workspace --all-targets -- -D warnings` both pass across all 13 crates with zero exclusions.
    - **Slice 23 (`053c4b1`)**: Per-site injected JS scripts (`site_scripts.rs` covering all 14 legacy service IDs: Gmail, Slack, WhatsApp, Messenger, Outlook/Office 365, Google Drive/Calendar/Cloud/Keep/Meet, Asana) + `addSnoozeDurationInMsChangeListener` / `removeSnoozeDurationInMsChangeListener` + `webview::sync_snooze` fan-out. Verified live in headless Chrome via `agent-browser`.
    - **Slice 24 (`417e39e`)**: Native About Station surface (`about.rs` over `about-window`, Settings → General entry, v1 GitHub Releases check-for-updates link, `--scene about`) + fatal error dialogs (`dialogs.rs`, Win32 `MessageBoxW` / stderr fallback, wired around `app.run()` via `catch_unwind`).

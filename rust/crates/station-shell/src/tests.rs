@@ -1535,6 +1535,7 @@ fn routing_a_scoped_link_lands_in_that_app_and_not_the_browser() {
         &apps,
         &tabs,
         Some("other-tab"),
+        &[],
     );
     assert_eq!(
         routed,
@@ -1551,7 +1552,7 @@ fn routing_unknown_links_and_unknown_tabs_stays_put() {
     let tabs: [url_router::OpenTab; 0] = [];
 
     assert_eq!(
-        routing::decide("https://example.com/page", &apps, &tabs, None),
+        routing::decide("https://example.com/page", &apps, &tabs, None, &[]),
         Routed::External
     );
     // A tab id that is not ours cannot be focused; the request is dropped, not sent to a browser
@@ -1563,7 +1564,13 @@ fn routing_unknown_links_and_unknown_tabs_stays_put() {
         is_home: true,
     }];
     assert_eq!(
-        routing::decide("https://elsewhere.test/x", &apps, &tabs, Some("gone-tab")),
+        routing::decide(
+            "https://elsewhere.test/x",
+            &apps,
+            &tabs,
+            Some("gone-tab"),
+            &[]
+        ),
         Routed::External
     );
 }
@@ -1594,7 +1601,8 @@ fn routing_a_link_that_matches_an_open_tab_only_focuses_it() {
             "https://app.todoist.com/auth/login",
             &apps,
             &tabs,
-            Some("gmail-tab")
+            Some("gmail-tab"),
+            &[],
         ),
         Routed::Focus {
             tab_id: "todoist-tab".to_owned()
@@ -1668,6 +1676,22 @@ fn an_unknown_link_goes_to_the_browser_and_changes_nothing() {
         "an external link touched a webview"
     );
     assert_eq!(rt.state.active().id, active);
+}
+
+#[test]
+fn a_page_popup_cannot_install_a_catalog_app() {
+    let _routing = routing_lock();
+    let recorded = routing::record_external();
+    let mut state = launched(&session_path("route-catalog-popup"));
+    assert!(state.install("station-manifest://21"));
+    let active = state.active().id.clone();
+    let url = "https://mail.google.com/mail/u/0/";
+
+    assert!(routing::enqueue(&active, url));
+    assert!(!webview::route_requests(&mut state, 0.0));
+    assert!(!state.is_installed("station-manifest://14"));
+    assert_eq!(state.active().id, active);
+    assert_eq!(routing::recorded_external(&recorded), [url]);
 }
 
 #[test]

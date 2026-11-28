@@ -459,33 +459,38 @@ mod win {
 #[cfg(target_os = "windows")]
 static LOCK: OnceLock<usize> = OnceLock::new();
 
-/// The entry every launch takes, before Rune is asked for anything: acquire the mutex. A
-/// secondary sends its deep link (or the focus-only ping) to the primary and **exits the
-/// process** — no state, no window, no listener. The primary keeps the handle and returns
-/// `false` to run on. A mutex call that fails outright logs once and runs sole: the shell must
-/// open even when the lock cannot.
-pub fn handoff_if_secondary() -> bool {
+/// Claims the desktop session until process exit or `shutdown`. An existing owner is reported
+/// without forwarding any arguments, so a maintenance command can require an idle shell.
+pub(crate) fn claim() -> std::io::Result<bool> {
     #[cfg(target_os = "windows")]
     {
         let name = win::wide(MUTEX_NAME);
         let (handle, primary) = win::create_or_existing(&name);
         if handle.is_null() {
-            eprintln!("station-shell: single-instance lock unavailable, running without it");
-            return false;
+            return Err(std::io::Error::last_os_error());
         }
         if !primary {
             win::close(handle);
+            return Ok(false);
+        }
+        let _ = LOCK.set(handle as usize);
+    }
+    Ok(true)
+}
+
+/// A secondary window launch forwards its focus or deep-link request and exits.
+/// The shell opens without coordination if the operating system cannot supply a lock.
+pub fn handoff_if_secondary() {
+    #[cfg(target_os = "windows")]
+    match claim() {
+        Ok(true) => {}
+        Ok(false) => {
             let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
             let url = deep_link::first_candidate(&args);
             send_to_primary(url.as_deref());
             std::process::exit(0);
         }
-        let _ = LOCK.set(handle as usize);
-        false
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
+        Err(_) => eprintln!("station-shell: single-instance lock unavailable, running without it"),
     }
 }
 

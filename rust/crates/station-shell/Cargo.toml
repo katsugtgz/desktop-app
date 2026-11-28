@@ -47,6 +47,8 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "10a39584cc1ff739477be
 # with `RegGetValueW`/`RegCreateKeyExW`/`RegSetValueExW`/`RegDeleteValueW`; no elevation.
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Registry"] }
 wry = { version = "0.57", default-features = false }
+webview2-com = "0.39.1"
+windows-core = "0.62.2"
 
 # Windows only: compiles `station.rc` (the exe's icon resource) with `rc.exe`/`windres` at
 # build time, so Explorer and the taskbar show the real icon without any runtime work.

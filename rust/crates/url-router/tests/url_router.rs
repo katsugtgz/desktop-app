@@ -426,6 +426,48 @@ fn opted_out_store_app_is_skipped() {
 }
 
 #[test]
+fn wildcard_store_scope_matches_a_workspace_subdomain() {
+    let store = [store_app(
+        "https://manifests.test/slack.json",
+        "https://*.slack.com",
+    )];
+    let request =
+        RouteRequest::new("https://team.slack.com/archives/abc", &[], &[]).with_store_apps(&store);
+
+    assert_eq!(
+        request.route(),
+        Route::InstallAndOpen {
+            manifest_url: "https://manifests.test/slack.json".into(),
+            url: "https://team.slack.com/archives/abc".into(),
+        }
+    );
+}
+
+#[test]
+fn concrete_store_subdomain_precedes_the_wildcard_branch() {
+    let store = [
+        store_app("https://manifests.test/fallback.json", "https://*.a.test"),
+        store_app(
+            "https://manifests.test/app.json",
+            "https://team.a.test/app/",
+        ),
+    ];
+    let url = "https://team.a.test/app/nested";
+    let request = RouteRequest::new(url, &[], &[]).with_store_apps(&store);
+    assert_eq!(
+        request.route(),
+        Route::InstallAndOpen {
+            manifest_url: "https://manifests.test/app.json".into(),
+            url: url.into(),
+        }
+    );
+
+    let request =
+        RouteRequest::new("https://team.a.test/elsewhere", &[], &[]).with_store_apps(&store);
+    assert_eq!(request.route(), Route::ExternalBrowser);
+}
+
+#[test]
 fn store_path_scopes_match_whole_segments_only() {
     // The TS radix tree inserts `path` and `path/**`, so scope paths match
     // at segment boundaries (unlike installed-app scopes' raw prefix).

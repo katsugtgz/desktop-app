@@ -507,33 +507,8 @@ fn find_app_in_installed_scopes<'a>(
     Ok(None)
 }
 
-/// `toRadixPath`: `/{protocol}/{domain}/{port}/{subdomain}{pathname}`, with
-/// `null` interpolated for a missing port or subdomain, `:subdomain` for a
-/// wildcard subdomain, and a root pathname dropped.
-fn radix_path(parsed: &ParsedUrl) -> String {
-    let subdomain = match parsed.subdomain.as_deref() {
-        Some("*") => ":subdomain".to_string(),
-        Some(subdomain) => subdomain.to_string(),
-        None => "null".to_string(),
-    };
-    let pathname = if parsed.pathname.is_empty() || parsed.pathname == "/" {
-        ""
-    } else {
-        parsed.pathname.as_str()
-    };
-    let port = parsed
-        .port
-        .map(|port| port.to_string())
-        .unwrap_or_else(|| "null".to_string());
-
-    format!(
-        "/{}/{}/{}/{}{}",
-        parsed.protocol, parsed.domain, port, subdomain, pathname
-    )
-}
-
-/// The radix tree inserts both `path` and `path/**`, so a store scope covers
-/// its exact path or any path below it, at segment boundaries.
+/// The radix tree inserts `path` and `path/**`, so a catalog scope covers its exact
+/// path or descendants at segment boundaries.
 fn store_scope_matches(url_path: &str, scope_path: &str) -> bool {
     url_path == scope_path
         || url_path
@@ -541,31 +516,48 @@ fn store_scope_matches(url_path: &str, scope_path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Port of `findInAllScopes`: the app-store catalogue behind a radix tree.
-///
-/// The tree's exact-match-priority is modelled as "longest matching scope
-/// path wins, input order breaks ties" — a radix lookup the TS library
-/// performs, not a rule written in `URLRouter.ts`. The opt-out check happens
-/// after the lookup, exactly like the TS: an opted-out winner yields `None`
-/// rather than falling back to a broader catalogue scope.
+/// The catalog router names a wildcard subdomain `:subdomain`. A concrete subdomain
+/// branch takes precedence over that placeholder, even when its path does not match.
+/// Within the chosen branch the longest matching scope wins (input order breaks ties).
+/// An opted-out winner does not fall back to another app.
 fn find_in_all_scopes<'a>(url: &str, store_apps: &'a [StoreApp]) -> Option<&'a StoreApp> {
-    let url_path = radix_path(&parse_url(url)?);
-
-    let mut best: Option<(usize, &'a StoreApp)> = None;
+    let url = parse_url(url)?;
+    let url_path = url.pathname.strip_suffix('/').unwrap_or(&url.pathname);
+    let mut has_concrete_branch = false;
+    let mut concrete: Option<(usize, &StoreApp)> = None;
+    let mut wildcard: Option<(usize, &StoreApp)> = None;
     for app in store_apps {
         for raw_scope in app.scope.iter().chain(app.extended_scopes.iter()) {
             let Some(scope) = parse_url(raw_scope) else {
-                // `tryInsertRadixPath` swallows unparseable scopes.
                 continue;
             };
-            let scope_path = radix_path(&scope);
-            if store_scope_matches(&url_path, &scope_path)
+            if scope.protocol != url.protocol
+                || scope.domain != url.domain
+                || scope.port != url.port
+            {
+                continue;
+            }
+            let best = if scope.subdomain.as_deref() == Some("*") {
+                &mut wildcard
+            } else if scope.subdomain == url.subdomain {
+                has_concrete_branch = true;
+                &mut concrete
+            } else {
+                continue;
+            };
+            let scope_path = scope.pathname.strip_suffix('/').unwrap_or(&scope.pathname);
+            if store_scope_matches(url_path, scope_path)
                 && best.is_none_or(|(length, _)| scope_path.len() > length)
             {
-                best = Some((scope_path.len(), app));
+                *best = Some((scope_path.len(), app));
             }
         }
     }
 
+    let best = if has_concrete_branch {
+        concrete
+    } else {
+        wildcard
+    };
     best.map(|(_, app)| app).filter(|app| !app.opted_out)
 }

@@ -61,6 +61,34 @@ See [`.github/workflows/release-candidate.yml`](.github/workflows/release-candid
 | Crash reports (8 KiB cap, 20 newest kept) | `<config dir>/station/crashes/` |
 | Google OAuth Option B (PKCE + loopback) | Set `GOOGLE_CLIENT_ID` (and optional `GOOGLE_CLIENT_SECRET`) in the environment |
 
+### Import from Electron Station
+
+Quit both the Electron and native versions of Station. Run the import before saving a native
+session. The first-run picker shows the import command when it finds the default Electron
+database.
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Station\station-shell.exe" --import-electron
+```
+
+The default source is `%APPDATA%\Stationv2\db\station.db`. Pass the database path after
+`--import-electron` for a custom Electron profile. The import creates a native session only when
+its session file is absent and leaves the old database untouched. It brings across the app list,
+rail order, favorites, and supported general and app settings. Open tab links from apps on your
+rail appear in the Quick Switcher under Favorites, which has room for 256 links including
+existing favorites. Custom app names and icons from the legacy private manifest file must be
+recreated. Sign in to your web apps again after importing.
+
+### Browser extensions and password saving on Windows
+
+Open a web app, then go to **Settings → Browser extensions** to install an unpacked extension
+from a folder you trust. Extensions are installed in that app's WebView2 profile. Open each app
+whose profile should use the extension.
+
+Enable **Offer to save website passwords** in Settings to let WebView2 offer to save new
+passwords in its own profiles. This starts off by default. Previously saved passwords can still
+autofill when the setting is off.
+
 ## Documentation
 
 - [`rust/README.md`](rust/README.md) — workspace crates, vendored Rune patches, and feature status

@@ -38,6 +38,9 @@ pub fn on_key(state: &mut ShellState, event: &rune::KeyEvent, _: &mut rune::Tx) 
             || state.close_tab_menu()
             || state.close_custom_app_form()
             || state.close_download_dir_editor()
+            || (state.surface() == Surface::Apps
+                && state.active().renders_in_rune()
+                && state.skip_onboarding())
             || state.close_overlay();
     }
     if event.is_command('k') || event.is_command('t') {

@@ -5,10 +5,13 @@
 //! 2. Installed Apps / Tabs (ranked by `activity::frecency::Frecency`)
 //! 3. Shell Actions (App Store, Settings, Notifications, About Station)
 //! 4. App Store catalog matches (when a search query is typed, up to 5 quick-install items)
+//!
+//! A pasted web link offers a Station or browser destination.
 
 use rune::tok::{self, radius, space, type_};
 use rune::{col, edit_access, el, row, text, text_input, El, ScrollSpec, TextEdit};
 
+use crate::routing::Routed;
 use crate::shell::Paint;
 use crate::state::{ShellState, TabKind};
 
@@ -63,6 +66,8 @@ pub enum QuickSwitchAction {
     OpenAbout,
     /// Install an app from the App Store catalog and focus it.
     InstallApp { manifest_url: String },
+    /// Open a pasted link in the location selected by the user.
+    OpenLink { url: String, route: Routed },
 }
 
 /// One rendered row in the quick-switcher results list.
@@ -81,6 +86,11 @@ pub struct QuickSwitchEntry {
 /// store quick-install matches.
 pub fn entries_for(state: &ShellState) -> Vec<QuickSwitchEntry> {
     let query = state.quick_switch().query();
+    if query.contains("://") {
+        return link_input(query)
+            .map(|url| link_entries(state, url.as_str()))
+            .unwrap_or_default();
+    }
     let query_lower = query.to_ascii_lowercase();
     let matches_query = |haystack: &str| -> bool {
         query_lower.is_empty() || haystack.to_ascii_lowercase().contains(&query_lower)
@@ -209,6 +219,65 @@ pub fn entries_for(state: &ShellState) -> Vec<QuickSwitchEntry> {
     }
 
     out
+}
+
+fn link_input(input: &str) -> Option<url::Url> {
+    let (scheme, rest) = input.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || authority.is_empty()
+        || authority.contains('@')
+        || input.contains('\\')
+        || input.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let url = url::Url::parse(input).ok()?;
+    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    Some(url)
+}
+
+fn link_entries(state: &ShellState, url: &str) -> Vec<QuickSwitchEntry> {
+    let route = state.route_quick_link(url);
+    let mut entries = Vec::new();
+    let station_choice = match &route {
+        Routed::Ignore | Routed::External => None,
+        Routed::InstallAndOpen { manifest_url, .. } => Some((
+            format!(
+                "Install and open {}",
+                state.install_link_label(manifest_url)
+            ),
+            "Install",
+        )),
+        _ => Some(("Open in Station".to_owned(), "App")),
+    };
+    if let Some((title, badge)) = station_choice {
+        entries.push(QuickSwitchEntry {
+            key: "qs-link-station".to_owned(),
+            frecency_id: String::new(),
+            title,
+            subtitle: url.to_owned(),
+            badge,
+            action: QuickSwitchAction::OpenLink {
+                url: url.to_owned(),
+                route,
+            },
+        });
+    }
+    entries.push(QuickSwitchEntry {
+        key: "qs-link-browser".to_owned(),
+        frecency_id: String::new(),
+        title: "Open in browser".to_owned(),
+        subtitle: url.to_owned(),
+        badge: "Browser",
+        action: QuickSwitchAction::OpenLink {
+            url: url.to_owned(),
+            route: Routed::External,
+        },
+    });
+    entries
 }
 
 /// Renders the Quick Switcher surface in the content pane.
@@ -379,11 +448,8 @@ pub fn view(state: &ShellState, p: Paint) -> El {
                                 .w_full()
                                 .single_line()
                                 .autofocus()
-                                .label("Jump to app, favorite, or action")
-                                .placeholder(
-                                    "Jump to app, favorite, or action...",
-                                    p.t.text_secondary,
-                                )
+                                .label("Find an app or paste a link")
+                                .placeholder("Find an app or paste a link", p.t.text_secondary)
                                 .color(p.t.text)
                                 .on_edit(edit_access(|state: &mut ShellState| {
                                     state.quick_switch_edit_mut()

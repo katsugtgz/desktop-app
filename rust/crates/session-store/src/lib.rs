@@ -17,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use appstore_service::{InstalledApplication, TabRecord};
 use serde::{Deserialize, Serialize};
 
+pub mod legacy;
+
 /// The only on-disk format this crate reads and writes.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -161,6 +163,9 @@ pub struct SessionState {
     /// quitting (Slice 35). Additive v1 field (default `false`).
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Whether WebView2 can prompt to save new passwords in its own profiles.
+    #[serde(default)]
+    pub password_autosave: bool,
 }
 
 /// One pinned favorite belonging to an installed application.
@@ -473,15 +478,42 @@ impl SessionStore {
     /// The document is validated (`sanitize`) before anything is written, so
     /// a state this build would refuse to *load* is never written either.
     pub fn save(&self, state: &SessionState) -> Result<(), StoreError> {
-        let mut state = state.clone();
-        sanitize(&mut state)?;
-        let bytes = serde_json::to_vec_pretty(&WireState {
-            version: FORMAT_VERSION,
-            state: &state,
-        })
-        .map_err(StoreError::Parse)?;
+        let bytes = encode(state)?;
         write_atomically(&self.path, &bytes).map_err(StoreError::Io)
     }
+
+    /// Atomically create a session only if the destination is absent, including when another
+    /// process is creating it at the same time.
+    pub fn create(&self, state: &SessionState) -> Result<(), StoreError> {
+        let bytes = encode(state)?;
+        let directory = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(directory).map_err(StoreError::Io)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(directory).map_err(StoreError::Io)?;
+        temporary.write_all(&bytes).map_err(StoreError::Io)?;
+        temporary.as_file().sync_all().map_err(StoreError::Io)?;
+        temporary
+            .persist_noclobber(&self.path)
+            .map_err(|error| StoreError::Io(error.error))?;
+        Ok(())
+    }
+}
+
+fn encode(state: &SessionState) -> Result<Vec<u8>, StoreError> {
+    let mut state = state.clone();
+    sanitize(&mut state)?;
+    let bytes = serde_json::to_vec_pretty(&WireState {
+        version: FORMAT_VERSION,
+        state: &state,
+    })
+    .map_err(StoreError::Parse)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(StoreError::TooLarge(bytes.len() as u64));
+    }
+    Ok(bytes)
 }
 
 /// Brings a parsed document into the range the shell can use: window sizes are clamped to

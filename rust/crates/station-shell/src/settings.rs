@@ -19,6 +19,22 @@ pub fn view(state: &ShellState, p: Paint) -> El {
     } else {
         my_apps(state, p)
     };
+    let body = col()
+        .key("settings-body")
+        .grow(1.0)
+        .w_full()
+        .min_h(0.0)
+        .px(space::S6)
+        .py(space::S6)
+        .gap(space::S6)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(general(state, p))
+        .child(accounts(state, p))
+        .child(apps_card);
+    #[cfg(target_os = "windows")]
+    let body = body.child(crate::extensions::settings_card(state, p));
     col()
         .key("content")
         .grow(1.0)
@@ -26,22 +42,7 @@ pub fn view(state: &ShellState, p: Paint) -> El {
         .min_h(0.0)
         .fill(p.t.bg)
         .child(header(p))
-        .child(
-            col()
-                .key("settings-body")
-                .grow(1.0)
-                .w_full()
-                .min_h(0.0)
-                .px(space::S6)
-                .py(space::S6)
-                .gap(space::S6)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(general(state, p))
-                .child(accounts(state, p))
-                .child(apps_card),
-        )
+        .child(body)
 }
 
 fn header(p: Paint) -> El {
@@ -130,6 +131,9 @@ fn general(state: &ShellState, p: Paint) -> El {
     }
     if let Some(row) = minimize_to_tray_row(state, p, crate::tray::supported()) {
         rows.push(row);
+    }
+    if cfg!(windows) {
+        rows.push(password_autosave_row(state, p));
     }
     rows.push(downloads_folder_row(state, p));
     if let Some(editor) = downloads_folder_editor(state, p) {
@@ -467,6 +471,39 @@ fn minimize_to_tray_row(state: &ShellState, p: Paint, supported: bool) -> Option
                     .color(p.t.text_secondary),
             ),
     )
+}
+
+fn password_autosave_row(state: &ShellState, p: Paint) -> El {
+    let enabled = state.password_autosave();
+    let label = "Offer to save website passwords";
+    row()
+        .key("settings-password-autosave")
+        .role("switch")
+        .label(label)
+        .focusable(true)
+        .checked(enabled)
+        .h(48.0)
+        .px(space::S3)
+        .center_y()
+        .justify_between()
+        .hover(p.t.hover)
+        .press(p.t.press)
+        .on_press(|state: &mut ShellState| state.toggle_password_autosave())
+        .child(
+            col()
+                .gap(space::S1)
+                .child(text(label).font(type_::BODY).color(p.t.text).a11y_hidden())
+                .child(
+                    text("Previously saved passwords can still autofill.")
+                        .font(type_::LABEL)
+                        .color(p.t.text_secondary),
+                ),
+        )
+        .child(
+            text(if enabled { "On" } else { "Off" })
+                .font(type_::MONO_CAPTION)
+                .color(p.t.text_secondary),
+        )
 }
 
 /// The stored accounts (slices 17 / 25): display name, email, and Remove button per identity,
@@ -1188,7 +1225,7 @@ fn identity_name(identity: &Identity) -> String {
 }
 
 /// A titled card: a section header and rows separated by hairlines.
-fn section(key: &str, title: &str, p: Paint, rows: Vec<El>) -> El {
+pub(crate) fn section(key: &str, title: &str, p: Paint, rows: Vec<El>) -> El {
     let mut card = col()
         .key(key)
         .w_full()

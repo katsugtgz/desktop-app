@@ -356,6 +356,12 @@ shows only intentional history.
   checker + beta channel (`updater.rs`) with manual browser download until/unless a signed staged
   updater is later prioritized.
 
+**Follow-up (2026-11-28)** restored the first-run app picker, added opt-in WebView2 password
+saving and per-profile management for unpacked extensions, and added a one-time import from the
+legacy Electron database. The Quick Switcher can install the app for a pasted link and save a
+workspace subdomain declared by its manifest. See [STATE.md](../STATE.md) for current release
+gates and remaining parity work.
+
 ---
 
 ## 4. The honest schedule
