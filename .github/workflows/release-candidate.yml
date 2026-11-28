@@ -1,78 +1,78 @@
 name: Release Candidate
 on:
-  push: 
+  push:
     tags:
-      - 'v*-b*'
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
-  Linux:
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@master
-      - uses: actions/setup-node@master
-        with:
-          node-version: "24"
-          cache: "yarn"
-      # See https://github.com/nodejs/node-gyp/blob/main/docs/Force-npm-to-use-global-node-gyp.md
-      # https://github.com/nodejs/node-gyp/blob/main/docs/Updating-npm-bundled-node-gyp.md
-      # - name: Update node-gyp
-      #   run: |
-      #     npm install --global node-gyp@8.x
-      #     npm config set node_gyp $(npm prefix -g)/lib/node_modules/node-gyp/bin/node-gyp.js
-      - name: Install dependencies
-        run: yarn install --immutable
-      # Since Electron 42 the `electron` package no longer downloads its binary in a
-      # `postinstall` script; it does so lazily on first use. Prefetch it explicitly so a
-      # download failure is reported here instead of mid-build.
-      - name: Download Electron binary
-        run: yarn workspace station-desktop-app exec install-electron
-      - name: Build and Release
-        run: yarn release
-
-  MacOs:
-    runs-on: macos-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-      CSC_LINK: ${{ secrets.CSC_LINK }}
-      AC_USERNAME: ${{ secrets.AC_USERNAME }}
-      AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
-      AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
-      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@master
-      - uses: actions/setup-node@master
-        with:
-          node-version: "24"
-          cache: "yarn"
-      - name: Install dependencies
-        run: yarn install --immutable
-      - name: Download Electron binary
-        run: yarn workspace station-desktop-app exec install-electron
-      - name: Build and Release
-        run: yarn release
-
-  Windows:
+  package-windows:
     runs-on: windows-2025
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-      CSC_LINK: ${{ secrets.CSC_LINK }}
-      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@master
-      - uses: actions/setup-node@master
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: "24"
-      - name: Install dependencies
-        run: yarn install --immutable
-      - name: Download Electron binary
-        run: yarn workspace station-desktop-app exec install-electron
-      - name: Build and Release
-        run: yarn release
+          workspaces: rust
+
+      - name: Resolve installer version
+        id: version
+        working-directory: rust
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not read Cargo workspace metadata" }
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'station-shell' }).version
+          if (-not $version) { throw "station-shell version is missing from Cargo metadata" }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match the station-shell version v$version"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build release shell
+        working-directory: rust
+        run: cargo build --locked --release -p station-shell
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Download WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force rust/packaging/dist | Out-Null
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "rust/packaging/dist/MicrosoftEdgeWebview2Setup.exe"
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" "/DVERSION=${{ steps.version.outputs.value }}" rust/packaging/installer.nsi
+
+      - name: Sign installer (optional)
+        shell: pwsh
+        env:
+          STATION_SIGNING_PFX_BASE64: ${{ secrets.STATION_SIGNING_PFX_BASE64 }}
+          STATION_SIGNING_PFX_PASSWORD: ${{ secrets.STATION_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:STATION_SIGNING_PFX_BASE64) {
+            Write-Host "STATION_SIGNING_PFX_BASE64 is not set; uploading the unsigned installer."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "station-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:STATION_SIGNING_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found; install the Windows SDK or wire Azure Artifact Signing" }
+          $signTool = $signtool.FullName
+          & $signTool sign /f $pfx /p $env:STATION_SIGNING_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "release/station-shell-setup-${{ steps.version.outputs.value }}.exe"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: station-shell-setup-${{ steps.version.outputs.value }}
+          path: release/station-shell-setup-${{ steps.version.outputs.value }}.exe
+          if-no-files-found: error

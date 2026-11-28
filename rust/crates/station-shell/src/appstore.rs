@@ -1,0 +1,595 @@
+//! The App Store, drawn by Rune inside the shell's content area.
+//!
+//! Station's store is two columns: a 220 pt sidebar (its name, a search field, and the DISCOVER
+//! sections) and the list the sidebar selects. Tiles are a 4-column grid of letter avatars;
+//! pressing an uninstalled tile installs the app and switches to it, pressing an installed one
+//! removes it (the rail row goes, and the caller closes its page).
+//!
+//! Everything here reads cached lists from [`ShellState`]; the only queries run are the ones a
+//! user action triggers (install/uninstall, and the search field's own refresh).
+
+use crate::shell::Paint;
+use crate::state::{ShellState, StoreSection, TileAction};
+use manifest_registry::MinimalApplication;
+use rune::tok::{self, radius, space, type_};
+use rune::{col, edit_access, el, row, text, text_input, El, ScrollSpec};
+
+/// The store's secondary sidebar, in points: Station's own is 220 pt wide.
+pub const SIDEBAR_WIDTH: f32 = 220.0;
+
+/// Tiles per grid row.
+const COLUMNS: usize = 4;
+
+/// The store's pane: sidebar beside the selected list, filling the shell's content box.
+pub fn view(state: &ShellState, p: Paint) -> El {
+    if let Some(onboarding) = state.onboarding() {
+        return crate::onboarding::view(state, onboarding, p);
+    }
+    col()
+        .key("content")
+        .grow(1.0)
+        .w_full()
+        .min_h(0.0)
+        .fill(p.t.bg)
+        .child(
+            row()
+                .key("store")
+                .grow(1.0)
+                .w_full()
+                .min_h(0.0)
+                .child(sidebar(state, p))
+                .child(main(state, p)),
+        )
+}
+
+fn sidebar(state: &ShellState, p: Paint) -> El {
+    let mut column = col()
+        .key("store-sidebar")
+        .w(SIDEBAR_WIDTH)
+        .h_full()
+        .min_h(0.0)
+        .py(space::S3)
+        .px(space::S2)
+        .gap(space::S1)
+        .fill(p.t.card)
+        .border_sides([0.0, 1.0, 0.0, 0.0], p.t.separator);
+    column = column.child(
+        row()
+            .key("store-title")
+            .h(28.0)
+            .px(space::S2)
+            .center_y()
+            .child(
+                text("Station App Store")
+                    .key("store-title-text")
+                    .font(type_::TITLE)
+                    .color(p.t.text),
+            ),
+    );
+    column = column.child(search_field(state, p));
+    column = column.child(
+        text("DISCOVER")
+            .key("store-discover")
+            .font(type_::SECTION)
+            .color(p.t.text_secondary)
+            .ml(space::S2)
+            .mt(space::S3)
+            .a11y_hidden(),
+    );
+    for section in StoreSection::ALL {
+        column = column.child(section_row(section, state.section(), p));
+    }
+    column.child(rune::spacer())
+}
+
+pub(crate) fn search_field(state: &ShellState, p: Paint) -> El {
+    el().key("store-search-box")
+        .w_full()
+        .h(30.0)
+        .px(space::S2)
+        .center_y()
+        .radius(radius::MD)
+        .fill(p.t.card)
+        .border(1.0, p.t.control_off)
+        .child(
+            text_input(state.search(), type_::BODY)
+                .key("store-search")
+                .w_full()
+                .single_line()
+                .label("Search an app")
+                .placeholder("Search an app", p.t.text_secondary)
+                .color(p.t.text)
+                .on_edit(edit_access(|state: &mut ShellState| state.search_mut()))
+                .on_input_change(|state: &mut ShellState, _| state.refresh_search()),
+        )
+}
+
+fn section_row(section: StoreSection, current: StoreSection, p: Paint) -> El {
+    let selected = section == current;
+    el().key(section.key())
+        .role("tab")
+        .label(section.label())
+        .checked(selected)
+        .focusable(true)
+        .w_full()
+        .h(30.0)
+        .px(space::S2)
+        .center_y()
+        .radius(radius::SM)
+        .fill(if selected {
+            p.t.control_track
+        } else {
+            p.t.card
+        })
+        .hover(p.t.hover)
+        .press(p.t.press)
+        .on_press(move |state: &mut ShellState| state.show_section(section))
+        .child(
+            text(section.label())
+                .font(type_::BODY)
+                .color(if selected {
+                    p.t.text
+                } else {
+                    p.t.text_secondary
+                })
+                .a11y_hidden(),
+        )
+}
+
+fn main(state: &ShellState, p: Paint) -> El {
+    let mut area = col()
+        .key("store-main")
+        .grow(1.0)
+        .h_full()
+        .min_h(0.0)
+        .py(space::S6)
+        .px(space::S6)
+        .gap(space::S6)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
+    area = area.child(heading(state, p));
+    if !state.query().trim().is_empty() {
+        area = area.child(grid(state.results(), state, p));
+    } else {
+        match state.section() {
+            StoreSection::MostPopular => {
+                let popular = state.popular();
+                for (title, apps) in [
+                    ("Cream of the crop", &popular.cream_of_the_crop_apps),
+                    ("Runner ups", &popular.runner_ups),
+                    ("Noteworthy", &popular.noteworthy),
+                ] {
+                    if apps.is_empty() {
+                        continue;
+                    }
+                    area = area.child(group(title, apps, state, p));
+                }
+            }
+            StoreSection::AllApps => {
+                for (category, apps) in state.categories() {
+                    if apps.is_empty() {
+                        continue;
+                    }
+                    area = area.child(group(category, apps, state, p));
+                }
+            }
+            StoreSection::MyCustomApps => {
+                area = area.child(custom_apps_section(state, p));
+            }
+        }
+    }
+    area
+}
+
+fn custom_apps_section(state: &ShellState, p: Paint) -> El {
+    let mut section = col().key("store-custom-section").w_full().gap(space::S3);
+    if let Some(draft) = state.custom_app_draft() {
+        section = section.child(custom_app_form(draft, p));
+    } else {
+        section = section.child(
+            row().key("store-custom-actions").w_full().child(
+                el().key("store-custom-add")
+                    .role("button")
+                    .label("Add custom app")
+                    .focusable(true)
+                    .h(30.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(p.t.control_track)
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| state.open_custom_app_form())
+                    .child(
+                        text("+ Add custom app")
+                            .font(type_::LABEL)
+                            .color(p.t.text)
+                            .a11y_hidden(),
+                    ),
+            ),
+        );
+    }
+
+    let custom = state.custom();
+    if custom.is_empty() {
+        if state.custom_app_draft().is_none() {
+            section = section.child(
+                text("No custom apps yet.")
+                    .key("store-custom-empty")
+                    .font(type_::BODY)
+                    .color(p.t.text_secondary),
+            );
+        }
+    } else {
+        let mut list = col().key("store-custom-list").w_full().gap(space::S2);
+        for app in custom {
+            let delete_id = app.id.parse::<u64>().ok();
+            let manifest_url = app.bx_app_manifest_url.clone();
+            let app_name = app.name.clone();
+            let mut item = row()
+                .key(format!("store-custom-row-{}", app.id))
+                .w_full()
+                .gap(space::S3)
+                .center_y()
+                .child(tile(app, state, p));
+            if let Some(numeric_id) = delete_id {
+                item = item.child(
+                    el().key(format!("store-custom-delete-{}", app.id))
+                        .role("button")
+                        .label(format!("Delete {app_name}"))
+                        .focusable(true)
+                        .h(26.0)
+                        .px(space::S2)
+                        .center()
+                        .radius(radius::SM)
+                        .fill(p.t.control_track)
+                        .hover(p.t.hover)
+                        .press(p.t.press)
+                        .on_press(move |state: &mut ShellState| {
+                            let removed = state.delete_custom_app(numeric_id, &manifest_url);
+                            for application_id in removed {
+                                crate::webview::close_tab(&application_id);
+                            }
+                        })
+                        .child(
+                            text("Delete")
+                                .font(type_::LABEL)
+                                .color(p.t.text_secondary)
+                                .a11y_hidden(),
+                        ),
+                );
+            }
+            list = list.child(item);
+        }
+        section = section.child(list);
+    }
+    section
+}
+
+fn custom_app_form(draft: &crate::state::CustomAppDraft, p: Paint) -> El {
+    let mut card = col()
+        .key("store-custom-form")
+        .w_full()
+        .max_w(560.0)
+        .padding(space::S3)
+        .gap(space::S2)
+        .radius(radius::MD)
+        .fill(p.t.card)
+        .border(1.0, p.t.card_border)
+        .child(
+            text("Add a custom web app")
+                .key("store-custom-form-title")
+                .font(type_::TITLE)
+                .color(p.t.text),
+        )
+        .child(custom_field(
+            "store-custom-name",
+            "App name",
+            "e.g. Acme Intranet",
+            &draft.name,
+            p,
+            |d| &mut d.name,
+        ))
+        .child(custom_field(
+            "store-custom-url",
+            "Start URL",
+            "https://intranet.acme.test",
+            &draft.start_url,
+            p,
+            |d| &mut d.start_url,
+        ))
+        .child(custom_field(
+            "store-custom-scope",
+            "Scope URL (optional — defaults to Start URL origin)",
+            "https://intranet.acme.test",
+            &draft.scope,
+            p,
+            |d| &mut d.scope,
+        ))
+        .child(custom_field(
+            "store-custom-icon",
+            "Icon URL (optional)",
+            "https://intranet.acme.test/favicon.png",
+            &draft.icon_url,
+            p,
+            |d| &mut d.icon_url,
+        ))
+        .child(custom_field(
+            "store-custom-color",
+            "Theme color (optional hex)",
+            "#2B5CE6",
+            &draft.theme_color,
+            p,
+            |d| &mut d.theme_color,
+        ));
+
+    if let Some(err) = draft.error.as_deref() {
+        card = card.child(
+            text(err.to_owned())
+                .key("store-custom-error")
+                .font(type_::LABEL)
+                .color(rune::color::hex("#EF5757").unwrap_or(p.t.text)),
+        );
+    }
+
+    card.child(
+        row()
+            .key("store-custom-form-actions")
+            .gap(space::S2)
+            .mt(space::S1)
+            .child(
+                el().key("store-custom-submit")
+                    .role("button")
+                    .label("Create & Install")
+                    .focusable(true)
+                    .h(28.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(tok::accent(0, p.dark))
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| {
+                        state.submit_custom_app_draft();
+                    })
+                    .child(
+                        text("Create & Install")
+                            .font(type_::LABEL)
+                            .color(rune::color::hex("#FFFFFF").unwrap_or(p.t.text))
+                            .a11y_hidden(),
+                    ),
+            )
+            .child(
+                el().key("store-custom-cancel")
+                    .role("button")
+                    .label("Cancel")
+                    .focusable(true)
+                    .h(28.0)
+                    .px(space::S3)
+                    .center()
+                    .radius(radius::SM)
+                    .fill(p.t.control_track)
+                    .hover(p.t.hover)
+                    .press(p.t.press)
+                    .on_press(|state: &mut ShellState| {
+                        state.close_custom_app_form();
+                    })
+                    .child(
+                        text("Cancel")
+                            .font(type_::LABEL)
+                            .color(p.t.text)
+                            .a11y_hidden(),
+                    ),
+            ),
+    )
+}
+
+fn custom_field(
+    key: &'static str,
+    label: &'static str,
+    placeholder: &'static str,
+    edit: &rune::TextEdit,
+    p: Paint,
+    field: fn(&mut crate::state::CustomAppDraft) -> &mut rune::TextEdit,
+) -> El {
+    col()
+        .w_full()
+        .gap(4.0)
+        .child(
+            text(label)
+                .font(type_::LABEL)
+                .color(p.t.text_secondary)
+                .a11y_hidden(),
+        )
+        .child(
+            el().key(format!("{key}-box"))
+                .w_full()
+                .h(30.0)
+                .px(space::S2)
+                .center_y()
+                .radius(radius::SM)
+                .fill(p.t.bg)
+                .border(1.0, p.t.control_off)
+                .child(
+                    text_input(edit, type_::BODY)
+                        .key(key)
+                        .w_full()
+                        .single_line()
+                        .label(label)
+                        .placeholder(placeholder, p.t.text_secondary)
+                        .color(p.t.text)
+                        .on_edit(edit_access(move |state: &mut ShellState| {
+                            field(
+                                state
+                                    .custom_app_draft_mut()
+                                    .expect("custom app draft open while form renders"),
+                            )
+                        })),
+                ),
+        )
+}
+
+fn heading(state: &ShellState, p: Paint) -> El {
+    let query = state.query().trim();
+    let (title, subtitle) = if query.is_empty() {
+        let subtitle = match state.section() {
+            StoreSection::MostPopular => "The most installed apps by the Station community",
+            StoreSection::AllApps => "Every app the Station app store lists",
+            StoreSection::MyCustomApps => "Apps you added yourself",
+        };
+        (state.section().main_title(), subtitle.to_owned())
+    } else {
+        (
+            "Search results",
+            format!("{} matching “{query}”", state.results().len()),
+        )
+    };
+    col()
+        .key("store-heading")
+        .w_full()
+        .gap(space::S1)
+        .child(
+            text(title)
+                .key("store-heading-title")
+                .font(type_::TITLE)
+                .color(p.t.text),
+        )
+        .child(
+            text(subtitle)
+                .key("store-heading-subtitle")
+                .font(type_::LABEL)
+                .color(p.t.text_secondary),
+        )
+        .child(
+            el().key("store-heading-rule")
+                .w_full()
+                .h(1.0)
+                .mt(space::S2)
+                .fill(p.t.separator)
+                .a11y_hidden(),
+        )
+}
+
+/// One titled band of tiles: the store's "Cream of the crop", a category, or a search's results.
+fn group(title: &str, apps: &[MinimalApplication], state: &ShellState, p: Paint) -> El {
+    col()
+        .key(format!("store-group-{}", slug(title)))
+        .w_full()
+        .gap(space::S3)
+        .child(
+            col()
+                .gap(space::S1)
+                .child(
+                    text(title)
+                        .key("store-group-title")
+                        .font(type_::SECTION)
+                        .color(p.t.text_secondary),
+                )
+                .child(
+                    el().key("store-group-underline")
+                        .w(40.0)
+                        .h(2.0)
+                        .radius(1.0)
+                        .fill(tok::accent(0, p.dark))
+                        .a11y_hidden(),
+                ),
+        )
+        .child(grid(apps, state, p))
+}
+
+fn grid(apps: &[MinimalApplication], state: &ShellState, p: Paint) -> El {
+    let mut grid = col().key("store-grid").w_full().gap(space::S3);
+    for chunk in apps.chunks(COLUMNS) {
+        let mut line = row().w_full().gap(space::S3);
+        for app in chunk {
+            line = line.child(tile(app, state, p));
+        }
+        // Keep the last row's tiles the width of a full row's.
+        for _ in chunk.len()..COLUMNS {
+            line = line.child(rune::spacer());
+        }
+        grid = grid.child(line);
+    }
+    grid
+}
+
+fn tile(app: &MinimalApplication, state: &ShellState, p: Paint) -> El {
+    let installed = state.is_installed(&app.bx_app_manifest_url);
+    let pressed = app.clone();
+    let mut tile = el()
+        .key(format!("store-tile-{}", app.id))
+        .role("button")
+        .label(app.name.clone())
+        .focusable(true)
+        .grow(1.0)
+        .h(40.0)
+        .gap(space::S3)
+        .center_y()
+        .radius(radius::SM)
+        .hover(p.t.hover)
+        .press(p.t.press)
+        .on_press(move |state: &mut ShellState| {
+            if let TileAction::Uninstalled { application_id } = state.activate_tile(&pressed) {
+                crate::webview::close_tab(&application_id);
+            }
+        })
+        .child(
+            crate::icons::avatar(
+                &app.name,
+                &app.id,
+                &app.theme_color,
+                28.0,
+                p,
+                state.icon_pixels(&app.icon_url),
+            )
+            .key(format!("store-icon-{}", app.id)),
+        );
+    if installed {
+        tile = tile.child(
+            col()
+                .grow(1.0)
+                .gap(2.0)
+                .child(
+                    text(app.name.clone())
+                        .font(type_::BODY)
+                        .color(p.t.text)
+                        .truncate(),
+                )
+                .child(
+                    text("Installed")
+                        .key(format!("store-installed-{}", app.id))
+                        .font(type_::LABEL)
+                        .color(tok::accent(0, p.dark)),
+                ),
+        );
+    } else {
+        tile = tile.child(
+            text(app.name.clone())
+                .grow(1.0)
+                .font(type_::BODY)
+                .color(p.t.text)
+                .truncate(),
+        );
+    }
+    tile
+}
+
+/// A stable element key from a title: lowercase ASCII alphanumerics, runs joined by dashes.
+fn slug(title: &str) -> String {
+    let mut slug = String::with_capacity(title.len());
+    let mut dash = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            dash = false;
+        } else if !dash && !slug.is_empty() {
+            slug.push('-');
+            dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}

@@ -95,13 +95,15 @@ fn golden_do_not_list_excluded() {
 #[test]
 fn golden_private_manifests_searched() {
     let mut store = PrivateStore::from_manifests(unique_path("search")).unwrap();
-    store.save_new_application(manifest_registry::NewPrivateApplication {
-        name: "Zephyr Internal".into(),
-        scope: "https://zephyr.internal".into(),
-        start_url: "https://zephyr.internal/home".into(),
-        icon_url: "https://zephyr.internal/icon.png".into(),
-        theme_color: "#102030".into(),
-    });
+    store
+        .save_new_application(manifest_registry::NewPrivateApplication {
+            name: "Zephyr Internal".into(),
+            scope: "https://zephyr.internal".into(),
+            start_url: "https://zephyr.internal/home".into(),
+            icon_url: "https://zephyr.internal/icon.png".into(),
+            theme_color: "#102030".into(),
+        })
+        .unwrap();
 
     let results = manifest_registry::search_with_private("zephyr", &store);
     assert_eq!(results.len(), 1);
@@ -122,20 +124,24 @@ fn golden_private_manifests_searched() {
 fn golden_private_round_trip_and_delete() {
     let path = unique_path("roundtrip");
     let mut store = PrivateStore::from_manifests(&path).unwrap();
-    let first = store.save_new_application(manifest_registry::NewPrivateApplication {
-        name: "Alpha Tool".into(),
-        scope: "https://alpha.tool".into(),
-        start_url: "https://alpha.tool/start".into(),
-        icon_url: "https://alpha.tool/i.png".into(),
-        theme_color: "#aabbcc".into(),
-    });
-    let second = store.save_new_application(manifest_registry::NewPrivateApplication {
-        name: "Beta Tool".into(),
-        scope: "https://beta.tool".into(),
-        start_url: "https://beta.tool/start".into(),
-        icon_url: "https://beta.tool/i.png".into(),
-        theme_color: "#000000".into(),
-    });
+    let first = store
+        .save_new_application(manifest_registry::NewPrivateApplication {
+            name: "Alpha Tool".into(),
+            scope: "https://alpha.tool".into(),
+            start_url: "https://alpha.tool/start".into(),
+            icon_url: "https://alpha.tool/i.png".into(),
+            theme_color: "#aabbcc".into(),
+        })
+        .unwrap();
+    let second = store
+        .save_new_application(manifest_registry::NewPrivateApplication {
+            name: "Beta Tool".into(),
+            scope: "https://beta.tool".into(),
+            start_url: "https://beta.tool/start".into(),
+            icon_url: "https://beta.tool/i.png".into(),
+            theme_color: "#000000".into(),
+        })
+        .unwrap();
     assert_eq!((first, second), (1000001, 1000002));
 
     // Persisted JSON is `{ "data": [...] }` like the TS store.
@@ -148,20 +154,22 @@ fn golden_private_round_trip_and_delete() {
 
     // Reload from disk keeps ids stable and bumps past the highest one.
     let mut reloaded = PrivateStore::from_manifests(&path).unwrap();
-    let third = reloaded.save_new_application(manifest_registry::NewPrivateApplication {
-        name: "Gamma".into(),
-        scope: "https://g.amma".into(),
-        start_url: "https://g.amma/s".into(),
-        icon_url: "https://g.amma/i.png".into(),
-        theme_color: "#111111".into(),
-    });
+    let third = reloaded
+        .save_new_application(manifest_registry::NewPrivateApplication {
+            name: "Gamma".into(),
+            scope: "https://g.amma".into(),
+            start_url: "https://g.amma/s".into(),
+            icon_url: "https://g.amma/i.png".into(),
+            theme_color: "#111111".into(),
+        })
+        .unwrap();
     assert_eq!(third, 1000003);
 
-    reloaded.delete_manifest(1000001);
+    reloaded.delete_manifest(1000001).unwrap();
     assert!(reloaded.get_private_application_by_id(1000001).is_none());
     assert!(reloaded.get_private_application_by_id(1000002).is_some());
     // Deleting an unknown id is a no-op.
-    reloaded.delete_manifest(42);
+    reloaded.delete_manifest(42).unwrap();
     assert_eq!(reloaded.get_private_manifests().len(), 2);
 }
 

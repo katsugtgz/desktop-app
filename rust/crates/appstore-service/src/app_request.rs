@@ -132,11 +132,11 @@ impl AppRequest {
     }
 
     /// `submit_app_request` wired to the real private-manifest store
-    /// (`window.bxApi.applications.requestPrivate`, which cannot fail in the
-    /// local port — `saveNewApplication` either persists or panics).
+    /// (`window.bxApi.applications.requestPrivate`). A store write failure
+    /// lands the request on `Error`, like the TS `catch` around the IPC call.
     pub fn submit_via(&mut self, request: &AppRequestData, apps: &mut ApplicationService) {
         submit_app_request(self, request, |recipe| {
-            Ok::<_, std::convert::Infallible>(apps.request_private_application(recipe))
+            apps.request_private_application(recipe)
         });
     }
 }

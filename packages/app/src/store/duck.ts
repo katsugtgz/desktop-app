@@ -1,1 +1,0 @@
-export const REHYDRATION_COMPLETE = 'persist/REHYDRATION_COMPLETE';

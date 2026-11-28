@@ -126,6 +126,46 @@ pub struct InstalledApplication {
     pub config_data: ApplicationConfigData,
 }
 
+/// Why a persisted session could not be replayed into [`ApplicationService`].
+///
+/// Every variant names the offending id: a session is either restored whole or refused, never
+/// silently trimmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreError {
+    /// Two installed records share an application id.
+    DuplicateApplication(String),
+    /// Two dock entries name the same application.
+    DuplicateDockEntry(String),
+    /// The dock names an application that is not installed.
+    UnknownDockApplication(String),
+    /// Two tabs share a tab id.
+    DuplicateTab(String),
+    /// A tab belongs to an application that is not installed.
+    UnknownTabApplication(String),
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestoreError::DuplicateApplication(id) => {
+                write!(f, "session installs application {id} twice")
+            }
+            RestoreError::DuplicateDockEntry(id) => {
+                write!(f, "session docks application {id} twice")
+            }
+            RestoreError::UnknownDockApplication(id) => {
+                write!(f, "session docks {id}, which it does not install")
+            }
+            RestoreError::DuplicateTab(id) => write!(f, "session has two tabs with id {id}"),
+            RestoreError::UnknownTabApplication(id) => {
+                write!(f, "session has a tab of {id}, which it does not install")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
 /// Failures of [`ApplicationService`] commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationError {
@@ -138,6 +178,8 @@ pub enum ApplicationError {
     ManifestNotAvailable(String),
     /// `uninstallApplication` on an id that was never installed.
     NotInstalled(String),
+    /// The private-manifest store could not be written (read-only or full disk).
+    PrivateStoreWrite(String),
 }
 
 impl std::fmt::Display for ApplicationError {
@@ -151,6 +193,9 @@ impl std::fmt::Display for ApplicationError {
             }
             ApplicationError::ManifestNotAvailable(url) => {
                 write!(f, "Could not get the manifest {url}")
+            }
+            ApplicationError::PrivateStoreWrite(why) => {
+                write!(f, "private manifest store: {why}")
             }
             ApplicationError::NotInstalled(id) => {
                 write!(f, "application {id} is not installed")
@@ -285,12 +330,29 @@ impl ApplicationService {
         })
     }
 
+    /// A service over an in-memory private-manifest store: nothing is written, so it works on a
+    /// machine whose config dir cannot be opened. Installs still work for the session.
+    pub fn in_memory() -> Self {
+        Self::from_private_store(PrivateStore::in_memory()).expect("an in-memory store cannot fail")
+    }
+
     /// Tests get an isolated temp-dir store without pulling in a tempfile
     /// dependency: a fresh folder under the system temp dir, removed when
     /// this process exits is fine for `cargo test` hygiene.
+    ///
+    /// The folder is unique per call, not just per tag: several tests reuse one tag (and two
+    /// test binaries in different processes can run the same tag at once), and this constructor
+    /// deletes the folder first, so sharing it would delete a live store underneath another
+    /// test.
     #[doc(hidden)]
     pub fn for_tests(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("station-s11b-{tag}"));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "station-s11b-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         Self::from_manifests_path(dir.join("private-manifests.json"))
@@ -401,6 +463,83 @@ impl ApplicationService {
         })
     }
 
+    /// The URL an install of `manifest_url` would open for `application_id`: the manifest's start
+    /// URL with `config` applied, or the multi-instance configurator when a preset app's config
+    /// did not resolve one. `None` when the manifest is unknown or has no start URL.
+    ///
+    /// This is the same decision [`ApplicationService::install`] makes, exposed so a caller (a
+    /// settings screen re-opening an app, an OAuth completion) can ask without installing.
+    pub fn resolve_start_url(
+        &self,
+        manifest_url: &str,
+        application_id: &str,
+        config: &ApplicationConfigData,
+    ) -> Option<String> {
+        let manifest = self.resolve_manifest(manifest_url).ok()?;
+        start_url_for_install(&manifest, manifest_url, application_id, config)
+    }
+
+    /// `setConfigData` (`packages/app/src/applications/duck.ts`, via
+    /// `window.bxApi.applications.setConfigData`): sets an installed
+    /// application's multi-instance configuration.
+    ///
+    /// TS merges the given fields into the stored config data (`SET_CONFIG_DATA` sets each truthy
+    /// field it names and keeps the rest): each `Some` field here overwrites the stored one, the
+    /// others keep their value. The preset gate
+    /// (`setIdentityIfMultiInstanceApplication`'s order) still applies: only
+    /// the field the manifest's first matching preset consumes is kept, so a
+    /// `subdomain` on a google-account app is not stored. `Ok(false)` when
+    /// nothing changed (the id is unknown or no field survived the gate), so
+    /// a caller only persists when it must.
+    pub fn set_config_data(
+        &mut self,
+        application_id: &str,
+        config: &ApplicationConfigData,
+    ) -> Result<bool, ApplicationError> {
+        let Some(installed) = self.installed.get(application_id) else {
+            return Err(ApplicationError::NotInstalled(application_id.to_owned()));
+        };
+        let manifest = self.resolve_manifest(&installed.manifest_url)?;
+        // Merge first (TS `state.setIn` per truthy field), then gate.
+        let mut merged = installed.config_data.clone();
+        if config.identity_id.is_some() {
+            merged.identity_id = config.identity_id.clone();
+        }
+        if config.subdomain.is_some() {
+            merged.subdomain = config.subdomain.clone();
+        }
+        if config.custom_url.is_some() {
+            merged.custom_url = config.custom_url.clone();
+        }
+        let kept = config_data_for_presets(&manifest, &merged);
+        if kept == installed.config_data {
+            return Ok(false);
+        }
+        self.installed
+            .get_mut(application_id)
+            .expect("checked above")
+            .config_data = kept;
+        Ok(true)
+    }
+
+    /// The settings surface's "Clear": removes an installed application's
+    /// multi-instance configuration, reverting it to the manifest's own
+    /// (signed-out) start URL. False when there was nothing to clear; an
+    /// unknown id is an error, like [`ApplicationService::uninstall`].
+    pub fn clear_config_data(&mut self, application_id: &str) -> Result<bool, ApplicationError> {
+        let Some(installed) = self.installed.get(application_id) else {
+            return Err(ApplicationError::NotInstalled(application_id.to_owned()));
+        };
+        if installed.config_data == ApplicationConfigData::default() {
+            return Ok(false);
+        }
+        self.installed
+            .get_mut(application_id)
+            .expect("checked above")
+            .config_data = ApplicationConfigData::default();
+        Ok(true)
+    }
+
     /// Port of `uninstallApplication` (lifecycle.ts): close all tabs in the
     /// app, drop the application entry, remove the dock item, remove the
     /// password-manager link, delete the app's favorites.
@@ -429,25 +568,122 @@ impl ApplicationService {
         Ok(())
     }
 
+    /// Port of `uninstallAllInstances` (`abstract-application/sagas.ts`):
+    /// uninstall every installed application of `manifest_url`, then delete
+    /// the private manifest when the URL names one above the 1000000
+    /// sentinel (the saga's `manifestId > 1000000` guard; an absent id is a
+    /// no-op in the store, like the TS `filter`).
+    ///
+    /// TS order is kept — instances first, manifest last — so a failing
+    /// private-store write is reported after the removals, the same partial
+    /// state the saga leaves behind; each per-instance uninstall itself
+    /// stays all-or-nothing. Returns the number of instances removed.
+    pub fn uninstall_all_for_manifest(
+        &mut self,
+        manifest_url: &str,
+    ) -> Result<usize, ApplicationError> {
+        let ids: Vec<String> = self
+            .installed
+            .values()
+            .filter(|a| a.manifest_url == manifest_url)
+            .map(|a| a.application_id.clone())
+            .collect();
+        for id in &ids {
+            self.uninstall(id)?;
+        }
+        // `manifestURL.match(/^station-manifest:\/\/(\d+)$/)` without a
+        // regex: digits only, and a number too large for u64 names no real
+        // manifest (TS's `Number` overflow behaves the same — the delete is
+        // a no-op).
+        if let Some(id) = manifest_url
+            .strip_prefix("station-manifest://")
+            .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .filter(|&id| id > 1_000_000)
+        {
+            self.delete_private_manifest(id)?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Replays a persisted session into this service: the installed applications, the dock and
+    /// the tabs, validated as a whole.
+    ///
+    /// A session is either restored or refused — nothing is dropped to make a bad one fit. The
+    /// checks are the invariants the rest of the shell relies on: application ids are unique,
+    /// every dock entry names an installed application (once), every tab names an installed
+    /// application, and tab ids are unique. On error this service is left exactly as it was.
+    pub fn restore(
+        &mut self,
+        installed: Vec<InstalledApplication>,
+        dock: Vec<String>,
+        tabs: Vec<TabRecord>,
+    ) -> Result<(), RestoreError> {
+        let mut applications: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for application in &installed {
+            if !applications.insert(application.application_id.as_str()) {
+                return Err(RestoreError::DuplicateApplication(
+                    application.application_id.clone(),
+                ));
+            }
+        }
+        let mut docked: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for id in &dock {
+            if !applications.contains(id.as_str()) {
+                return Err(RestoreError::UnknownDockApplication(id.clone()));
+            }
+            if !docked.insert(id.as_str()) {
+                return Err(RestoreError::DuplicateDockEntry(id.clone()));
+            }
+        }
+        let mut tab_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for tab in &tabs {
+            if !tab_ids.insert(tab.tab_id.as_str()) {
+                return Err(RestoreError::DuplicateTab(tab.tab_id.clone()));
+            }
+            if !applications.contains(tab.application_id.as_str()) {
+                return Err(RestoreError::UnknownTabApplication(
+                    tab.application_id.clone(),
+                ));
+            }
+        }
+
+        self.installed = installed
+            .into_iter()
+            .map(|application| (application.application_id.clone(), application))
+            .collect();
+        self.dock = dock;
+        self.tabs = tabs;
+        Ok(())
+    }
+
     /// Port of `requestPrivateApplication` (app-store sagas.ts): builds the
     /// private manifest on disk and returns `{ id, bxAppManifestURL }`.
+    ///
+    /// A store that cannot be written is an error, not a panic: the mapped
+    /// [`ApplicationError::PrivateStoreWrite`] is what a caller shows.
     pub fn request_private_application(
         &mut self,
         recipe: NewPrivateApplication,
-    ) -> ApplicationCreated {
-        let id = self.private.save_new_application(recipe);
-        ApplicationCreated {
+    ) -> Result<ApplicationCreated, ApplicationError> {
+        let id = self
+            .private
+            .save_new_application(recipe)
+            .map_err(|why| ApplicationError::PrivateStoreWrite(why.to_string()))?;
+        Ok(ApplicationCreated {
             id: id.to_string(),
             bx_app_manifest_url: manifest_registry::get_bx_app_manifest_url(&id.to_string()),
-        }
+        })
     }
 
     /// Port of the private half of `getPrivateApplicationById` deletion —
     /// `deleteManifest(id)` from `manifests/private.ts` (unknown id is a
     /// no-op), kept separate from `uninstall` because TS never routes one
     /// through the other.
-    pub fn delete_private_manifest(&mut self, id: u64) {
-        self.private.delete_manifest(id);
+    pub fn delete_private_manifest(&mut self, id: u64) -> Result<(), ApplicationError> {
+        self.private
+            .delete_manifest(id)
+            .map_err(|why| ApplicationError::PrivateStoreWrite(why.to_string()))
     }
 
     /// Port of `addApplicationRequest` (app-store sagas.ts) for the local
@@ -611,6 +847,14 @@ pub(crate) fn start_url_for_install(
     // getStartURLForPreset → getURLForPreset.
     if let Some(url) = get_url_for_preset(manifest, &presets, config_data) {
         return Some(url);
+    }
+    // Divergence from the TS saga, deliberate for the native shell: with no identity/config yet,
+    // the install opens the manifest's own formatted start URL, so a preset app is usable
+    // signed-out (Gmail's account picker) instead of landing on a configurator the shell does not
+    // draw. An install that carries config the presets did not use keeps the configurator, which
+    // is what OAuth will drive.
+    if *config_data == ApplicationConfigData::default() {
+        return Some(format_start_url(manifest, config_data));
     }
     // `startUrl || getMultiInstanceConfiguratorURL(manifestURL, applicationId)`.
     Some(get_multi_instance_configurator_url(
@@ -815,7 +1059,8 @@ mod tests {
             icon_url: "https://empty.test/logo.png".into(),
             start_url: String::new(),
             scope: "https://empty.test".into(),
-        });
+        })
+        .unwrap();
         let ret = apps
             .install("station-manifest://1000001", &InstallOptions::default())
             .unwrap();
@@ -923,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn golden_install_configurable_manifest_without_config_lands_on_configurator() {
+    fn golden_install_configurable_manifest_without_config_opens_its_start_url() {
         let mut apps = ApplicationService::for_tests("install-configurator");
         // Gmail with no config data: startUrl null → configurator URL.
         let ret = apps.install(GMAIL, &InstallOptions::default()).unwrap();
@@ -931,11 +1176,117 @@ mod tests {
             .installed_applications()
             .get(&ret.application_id)
             .unwrap();
-        let expected = format!(
-            "station://multi-instance-configurator/?manifestURL=station-manifest%3A%2F%2F14&applicationId={}",
-            ret.application_id
+        // The native shell's divergence: no identity/config yet opens the manifest's own
+        // formatted start URL (the signed-out account picker), not the configurator.
+        let url = app.home_tab_url.as_deref().expect("home tab");
+        assert!(
+            url.starts_with("https://accounts.google.com/AddSession?"),
+            "{url}"
         );
-        assert_eq!(app.home_tab_url.as_deref(), Some(expected.as_str()));
+        assert!(
+            url.contains("continue=https://mail.google.com/mail/u/"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn installing_with_config_the_presets_drop_still_opens_the_start_url() {
+        let mut apps = ApplicationService::for_tests("install-configurator-configured");
+        // Gmail's only preset is google-account (an identity id); a subdomain is not something it
+        // uses, so `setIdentityIfMultiInstanceApplication` drops it and the install has no config
+        // after all — the formatted start URL is still what opens.
+        let options = InstallOptions {
+            config_data: ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+            install_context: None,
+        };
+        let ret = apps.install(GMAIL, &options).unwrap();
+        let app = apps
+            .installed_applications()
+            .get(&ret.application_id)
+            .unwrap();
+        let url = app.home_tab_url.as_deref().expect("home tab");
+        assert!(
+            url.starts_with("https://accounts.google.com/AddSession?"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn config_the_presets_do_not_use_still_resolves_to_the_configurator() {
+        let apps = ApplicationService::for_tests("resolve-configurator");
+        // `resolve_start_url` takes the caller's config verbatim: a field none of the manifest's
+        // presets handle has no page to open, so the configurator stays the answer (OAuth drives
+        // that path).
+        let config = ApplicationConfigData {
+            subdomain: Some("acme".into()),
+            ..ApplicationConfigData::default()
+        };
+        let url = apps
+            .resolve_start_url(GMAIL, "application-5", &config)
+            .expect("a URL");
+        assert!(
+            url.starts_with("station://multi-instance-configurator/"),
+            "{url}"
+        );
+    }
+
+    #[test]
+    fn resolve_start_url_agrees_with_install_for_a_preset_app() {
+        let apps = ApplicationService::for_tests("resolve-preset");
+        let resolved = apps
+            .resolve_start_url(GMAIL, "application-1", &ApplicationConfigData::default())
+            .expect("a start URL");
+        assert!(
+            resolved.starts_with("https://accounts.google.com/AddSession?"),
+            "{resolved}"
+        );
+        assert!(
+            !resolved.starts_with("station://"),
+            "the configurator is not a page: {resolved}"
+        );
+    }
+
+    #[test]
+    fn resolve_start_url_leaves_a_plain_manifest_unchanged() {
+        let apps = ApplicationService::for_tests("resolve-plain");
+        assert_eq!(
+            apps.resolve_start_url(
+                "station-manifest://157",
+                "application-2",
+                &ApplicationConfigData::default()
+            )
+            .as_deref(),
+            Some("https://app.todoist.com/auth/login")
+        );
+    }
+
+    #[test]
+    fn resolve_start_url_keeps_an_on_premise_custom_url() {
+        let apps = ApplicationService::for_tests("resolve-on-premise");
+        let config = ApplicationConfigData {
+            custom_url: Some("https://gitlab.corp.acme.dev".into()),
+            ..ApplicationConfigData::default()
+        };
+        assert_eq!(
+            apps.resolve_start_url("station-manifest://123", "application-3", &config)
+                .as_deref(),
+            Some("https://gitlab.corp.acme.dev")
+        );
+    }
+
+    #[test]
+    fn resolve_start_url_reports_an_unknown_manifest() {
+        let apps = ApplicationService::for_tests("resolve-unknown");
+        assert!(apps
+            .resolve_start_url(
+                "station-manifest://999999",
+                "application-4",
+                &ApplicationConfigData::default()
+            )
+            .is_none());
     }
 
     #[test]
@@ -1017,6 +1368,63 @@ mod tests {
     }
 
     #[test]
+    fn golden_uninstall_all_for_manifest_removes_instances_keeps_others() {
+        let mut apps = ApplicationService::for_tests("uninstall-all-for-manifest");
+
+        // Two instances of one manifest, one survivor on another.
+        let a = apps.install(GMAIL, &InstallOptions::default()).unwrap();
+        let b = apps.install(GMAIL, &InstallOptions::default()).unwrap();
+        let other = apps
+            .install("station-manifest://157", &InstallOptions::default())
+            .unwrap();
+
+        let removed = apps.uninstall_all_for_manifest(GMAIL).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!apps
+            .installed_applications()
+            .contains_key(&a.application_id));
+        assert!(!apps
+            .installed_applications()
+            .contains_key(&b.application_id));
+        assert!(apps
+            .installed_applications()
+            .contains_key(&other.application_id));
+        assert!(apps
+            .tabs()
+            .iter()
+            .all(|t| t.application_id != a.application_id && t.application_id != b.application_id));
+        assert_eq!(apps.dock(), std::slice::from_ref(&other.application_id));
+
+        // A private manifest above the 1000000 sentinel goes with its last
+        // instance (the saga's `manifestId > 1000000` deleteManifest call).
+        let created = apps
+            .request_private_application(NewPrivateApplication {
+                name: "Acme Corp Intranet".into(),
+                theme_color: "#112233".into(),
+                icon_url: "https://acme.test/logo.png".into(),
+                start_url: "https://acme.test/login".into(),
+                scope: "https://acme.test".into(),
+            })
+            .unwrap();
+        apps.install(&created.bx_app_manifest_url, &InstallOptions::default())
+            .unwrap();
+        let removed = apps
+            .uninstall_all_for_manifest(&created.bx_app_manifest_url)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(apps.private_manifests().iter().all(|m| m.id != created.id));
+
+        // The survivor is still uninstallable on its own.
+        apps.uninstall(&other.application_id).unwrap();
+
+        // Zero instances (unknown URL): Ok(0), nothing else disturbed.
+        let removed = apps
+            .uninstall_all_for_manifest("station-manifest://999999")
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
     fn golden_add_application_request_guards_and_payload() {
         let mut apps = ApplicationService::for_tests("add-request");
 
@@ -1059,13 +1467,15 @@ mod tests {
     #[test]
     fn golden_request_private_application_persists_and_returns_manifest_url() {
         let mut apps = ApplicationService::for_tests("request-private");
-        let created = apps.request_private_application(NewPrivateApplication {
-            name: "Acme Corp Intranet".into(),
-            theme_color: "#112233".into(),
-            icon_url: "https://acme.test/logo.png".into(),
-            start_url: "https://acme.test/login".into(),
-            scope: "https://acme.test".into(),
-        });
+        let created = apps
+            .request_private_application(NewPrivateApplication {
+                name: "Acme Corp Intranet".into(),
+                theme_color: "#112233".into(),
+                icon_url: "https://acme.test/logo.png".into(),
+                start_url: "https://acme.test/login".into(),
+                scope: "https://acme.test".into(),
+            })
+            .unwrap();
         assert_eq!(created.id, "1000001");
         assert_eq!(created.bx_app_manifest_url, "station-manifest://1000001");
 
@@ -1094,7 +1504,7 @@ mod tests {
         );
 
         // deleteManifest removes it again.
-        apps.delete_private_manifest(1000001);
+        apps.delete_private_manifest(1000001).unwrap();
         assert!(apps.private_manifests().is_empty());
         assert_eq!(
             apps.install("station-manifest://1000001", &InstallOptions::default())
@@ -1117,24 +1527,28 @@ mod tests {
             icon_url: "".into(),
             start_url: "https://one.test".into(),
             scope: "https://one.test".into(),
-        });
+        })
+        .unwrap();
         apps.request_private_application(NewPrivateApplication {
             name: "Two".into(),
             theme_color: "#000000".into(),
             icon_url: "".into(),
             start_url: "https://two.test".into(),
             scope: "https://two.test".into(),
-        });
+        })
+        .unwrap();
 
         // Reload: ids continue after the highest persisted one.
         let mut reloaded = ApplicationService::from_manifests_path(&path).unwrap();
-        let third = reloaded.request_private_application(NewPrivateApplication {
-            name: "Three".into(),
-            theme_color: "#000000".into(),
-            icon_url: "".into(),
-            start_url: "https://three.test".into(),
-            scope: "https://three.test".into(),
-        });
+        let third = reloaded
+            .request_private_application(NewPrivateApplication {
+                name: "Three".into(),
+                theme_color: "#000000".into(),
+                icon_url: "".into(),
+                start_url: "https://three.test".into(),
+                scope: "https://three.test".into(),
+            })
+            .unwrap();
         assert_eq!(third.id, "1000003");
         assert_eq!(reloaded.private_manifests().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1179,6 +1593,218 @@ mod tests {
         );
     }
 
+    /// Installs two apps into a service and hands back the three persisted vectors.
+    fn two_installs(
+        tag: &str,
+    ) -> (
+        ApplicationService,
+        Vec<InstalledApplication>,
+        Vec<String>,
+        Vec<TabRecord>,
+    ) {
+        let mut apps = ApplicationService::for_tests(tag);
+        apps.install("station-manifest://14", &InstallOptions::default())
+            .unwrap();
+        apps.install("station-manifest://157", &InstallOptions::default())
+            .unwrap();
+        let installed: Vec<InstalledApplication> =
+            apps.installed_applications().values().cloned().collect();
+        let dock = apps.dock().to_vec();
+        let tabs = apps.tabs().to_vec();
+        (apps, installed, dock, tabs)
+    }
+
+    #[test]
+    fn restoring_a_live_session_reproduces_it() {
+        let (source, installed, dock, tabs) = two_installs("restore-valid-source");
+        assert!(!source.dock().is_empty());
+
+        let mut target = ApplicationService::for_tests("restore-valid-target");
+        target
+            .restore(installed.clone(), dock.clone(), tabs.clone())
+            .unwrap();
+
+        assert_eq!(target.dock(), dock.as_slice());
+        assert_eq!(target.tabs(), tabs.as_slice());
+        assert_eq!(target.installed_applications().len(), installed.len());
+        for application in &installed {
+            assert_eq!(
+                target
+                    .installed_applications()
+                    .get(&application.application_id),
+                Some(application)
+            );
+        }
+    }
+
+    #[test]
+    fn restore_refuses_a_dock_entry_it_does_not_install() {
+        let (_, installed, mut dock, tabs) = two_installs("restore-unknown-dock");
+        dock.push("never-installed".to_owned());
+        let mut target = ApplicationService::for_tests("restore-unknown-dock-target");
+
+        assert_eq!(
+            target.restore(installed, dock, tabs),
+            Err(RestoreError::UnknownDockApplication(
+                "never-installed".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn restore_refuses_duplicate_application_ids() {
+        let (_, installed, dock, tabs) = two_installs("restore-duplicate-app");
+        let repeated = installed[0].clone();
+        let mut doubled = installed.clone();
+        doubled.push(repeated.clone());
+        let mut target = ApplicationService::for_tests("restore-duplicate-app-target");
+
+        assert_eq!(
+            target.restore(doubled, dock, tabs),
+            Err(RestoreError::DuplicateApplication(
+                repeated.application_id.clone()
+            ))
+        );
+    }
+
+    #[test]
+    fn restore_refuses_duplicate_tab_ids() {
+        let (_, installed, dock, tabs) = two_installs("restore-duplicate-tab");
+        let repeated = tabs[0].clone();
+        let mut doubled = tabs.clone();
+        doubled.push(repeated.clone());
+        let mut target = ApplicationService::for_tests("restore-duplicate-tab-target");
+
+        assert_eq!(
+            target.restore(installed, dock, doubled),
+            Err(RestoreError::DuplicateTab(repeated.tab_id.clone()))
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_tab_of_an_application_it_does_not_install() {
+        let (_, installed, dock, tabs) = two_installs("restore-unknown-tab-app");
+        let mut stray_tabs = tabs.clone();
+        stray_tabs.push(TabRecord {
+            tab_id: "stray-tab".to_owned(),
+            application_id: "never-installed".to_owned(),
+            url: "https://example.test".to_owned(),
+            home: false,
+        });
+        let mut target = ApplicationService::for_tests("restore-unknown-tab-app-target");
+
+        assert_eq!(
+            target.restore(installed, dock, stray_tabs),
+            Err(RestoreError::UnknownTabApplication(
+                "never-installed".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_refused_restore_leaves_the_service_untouched() {
+        let mut target = ApplicationService::for_tests("restore-atomic");
+        target
+            .install("station-manifest://14", &InstallOptions::default())
+            .unwrap();
+        let before_dock = target.dock().to_vec();
+        let before_tabs = target.tabs().to_vec();
+        let before_installed: Vec<String> =
+            target.installed_applications().keys().cloned().collect();
+
+        assert!(target
+            .restore(Vec::new(), vec!["unknown".to_owned()], Vec::new())
+            .is_err());
+
+        assert_eq!(target.dock(), before_dock.as_slice());
+        assert_eq!(target.tabs(), before_tabs.as_slice());
+        let mut after: Vec<String> = target.installed_applications().keys().cloned().collect();
+        let mut before_sorted = before_installed;
+        after.sort();
+        before_sorted.sort();
+        assert_eq!(after, before_sorted);
+    }
+
+    /// A path whose parent is a file: any write below it fails as "not a directory".
+    fn unwritable_path(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("station-s6-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp root");
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("blocker file");
+        blocker.join("private-manifests.json")
+    }
+
+    fn recipe(name: &str) -> NewPrivateApplication {
+        NewPrivateApplication {
+            name: name.to_owned(),
+            theme_color: "#112233".to_owned(),
+            icon_url: "https://icon.test/i.png".to_owned(),
+            start_url: "https://app.test/".to_owned(),
+            scope: "https://app.test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_failed_private_store_write_is_an_error_not_a_panic() {
+        let mut apps = ApplicationService::from_manifests_path(unwritable_path("write"))
+            .expect("a store over an unwritable path");
+
+        let created = apps.request_private_application(recipe("Acme"));
+
+        match created {
+            Err(ApplicationError::PrivateStoreWrite(_)) => {}
+            other => panic!("expected PrivateStoreWrite, got {other:?}"),
+        }
+        assert!(
+            apps.private_manifests().is_empty(),
+            "a failed write left a record behind in memory"
+        );
+    }
+
+    #[test]
+    fn a_failed_private_delete_is_an_error_and_keeps_the_record() {
+        let root = std::env::temp_dir().join(format!("station-s6-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp root");
+        let manifests = root.join("private-manifests.json");
+        std::fs::write(
+            &manifests,
+            br##"{"data":[{"name":"Kept","scope":"https://kept.test","icons":[],"start_url":"https://kept.test/","category":"Miscellaneous","theme_color":"#000","id":1000001}]}"##,
+        )
+        .expect("seed store");
+        let mut apps = ApplicationService::from_manifests_path(&manifests).expect("seeded store");
+        assert_eq!(apps.private_manifests().len(), 1);
+
+        // Make the path unwritable by replacing the directory with a file.
+        std::fs::remove_dir_all(&root).expect("remove dir");
+        std::fs::write(&root, b"now a file").expect("block path");
+
+        match apps.delete_private_manifest(1000001) {
+            Err(ApplicationError::PrivateStoreWrite(_)) => {}
+            other => panic!("expected PrivateStoreWrite, got {other:?}"),
+        }
+        assert_eq!(
+            apps.private_manifests().len(),
+            1,
+            "a failed delete dropped the record from memory"
+        );
+    }
+
+    #[test]
+    fn an_in_memory_service_accepts_writes_without_a_disk() {
+        let mut apps = ApplicationService::in_memory();
+
+        let created = apps
+            .request_private_application(recipe("Ephemeral"))
+            .unwrap();
+
+        assert_eq!(created.id, "1000001");
+        assert_eq!(apps.private_manifests().len(), 1);
+        apps.delete_private_manifest(1000001).unwrap();
+        assert!(apps.private_manifests().is_empty());
+    }
+
     #[test]
     fn install_context_serializes_camel_case() {
         let ctx = InstallContext {
@@ -1193,5 +1819,221 @@ mod tests {
             serde_json::json!("oa/1")
         );
         assert_eq!(serde_json::from_value::<InstallContext>(json).unwrap(), ctx);
+    }
+
+    // ---- set_config_data / clear_config_data (slice 10) ----------------
+
+    const GITLAB: &str = "station-manifest://123";
+
+    #[test]
+    fn set_config_data_templates_the_start_url_for_a_google_account_app() {
+        let mut apps = ApplicationService::for_tests("config-gmail");
+        let app_id = apps
+            .install(GMAIL, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        let changed = apps
+            .set_config_data(
+                &app_id,
+                &ApplicationConfigData {
+                    identity_id: Some("identity-9".into()),
+                    ..ApplicationConfigData::default()
+                },
+            )
+            .unwrap();
+        assert!(changed);
+
+        let resolved = apps
+            .resolve_start_url(
+                GMAIL,
+                &app_id,
+                &ApplicationConfigData {
+                    identity_id: Some("identity-9".into()),
+                    ..ApplicationConfigData::default()
+                },
+            )
+            .unwrap();
+        // The template's `{{userIdentity.profileData.email}}` renders the
+        // stored value's shape (the TS template's own lookup); what matters
+        // here is that *some* identity was templated in, not the default
+        // empty render.
+        assert!(
+            resolved.starts_with("https://accounts.google.com/AddSession?"),
+            "{resolved}"
+        );
+    }
+
+    #[test]
+    fn set_config_data_keeps_only_what_the_first_preset_consumes() {
+        // A google-account preset drop: the TS saga's order
+        // (`setIdentityIfMultiInstanceApplication`) keeps the identity and
+        // never a subdomain the caller also passed.
+        let mut apps = ApplicationService::for_tests("config-gate");
+        let app_id = apps
+            .install(GMAIL, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                identity_id: Some("identity-9".into()),
+                subdomain: Some("acme".into()),
+                custom_url: Some("https://corp.example.com".into()),
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.identity_id.as_deref(), Some("identity-9"));
+        assert_eq!(app.config_data.subdomain, None);
+        assert_eq!(app.config_data.custom_url, None);
+    }
+
+    #[test]
+    fn set_config_data_on_a_subdomain_app_drives_the_template() {
+        // 100 Atlassian: subdomain preset, `start_url_tpl` = https://{{subdomain}}.atlassian.net/login
+        let mut apps = ApplicationService::for_tests("config-subdomain");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.subdomain.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn set_config_data_on_an_on_premise_app_stores_the_custom_url() {
+        let mut apps = ApplicationService::for_tests("config-on-premise");
+        let app_id = apps
+            .install(GITLAB, &InstallOptions::default())
+            .unwrap()
+            .application_id;
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                custom_url: Some("https://gitlab.corp.acme.dev".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            apps.resolve_start_url(
+                GITLAB,
+                &app_id,
+                &ApplicationConfigData {
+                    custom_url: Some("https://gitlab.corp.acme.dev".into()),
+                    ..ApplicationConfigData::default()
+                }
+            )
+            .as_deref(),
+            Some("https://gitlab.corp.acme.dev")
+        );
+    }
+
+    #[test]
+    fn set_config_data_merges_over_the_stored_fields() {
+        // TS `SET_CONFIG_DATA` sets each truthy field it names and keeps the rest.
+        let mut apps = ApplicationService::for_tests("config-merge");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("other".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data.subdomain.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn setting_the_same_config_again_reports_no_change() {
+        let mut apps = ApplicationService::for_tests("config-idempotent");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        let config = ApplicationConfigData {
+            subdomain: Some("acme".into()),
+            ..ApplicationConfigData::default()
+        };
+
+        assert!(apps.set_config_data(&app_id, &config).unwrap());
+        assert!(!apps.set_config_data(&app_id, &config).unwrap());
+    }
+
+    #[test]
+    fn set_config_data_on_an_unknown_app_is_an_error() {
+        let mut apps = ApplicationService::for_tests("config-unknown");
+        match apps.set_config_data("application-gone", &ApplicationConfigData::default()) {
+            Err(ApplicationError::NotInstalled(id)) => assert_eq!(id, "application-gone"),
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
+        assert!(apps.clear_config_data("application-gone").is_err());
+    }
+
+    #[test]
+    fn clear_config_data_reverts_to_the_manifest_start_url() {
+        let mut apps = ApplicationService::for_tests("config-clear");
+        let app_id = apps
+            .install("station-manifest://100", &InstallOptions::default())
+            .unwrap()
+            .application_id;
+        apps.set_config_data(
+            &app_id,
+            &ApplicationConfigData {
+                subdomain: Some("acme".into()),
+                ..ApplicationConfigData::default()
+            },
+        )
+        .unwrap();
+        assert!(apps.installed_applications()[&app_id]
+            .config_data
+            .subdomain
+            .is_some());
+
+        assert!(apps.clear_config_data(&app_id).unwrap());
+        assert!(
+            !apps.clear_config_data(&app_id).unwrap(),
+            "second clear changed nothing"
+        );
+
+        let app = apps.installed_applications().get(&app_id).unwrap();
+        assert_eq!(app.config_data, ApplicationConfigData::default());
+        // Back to the bare template (empty subdomain), like the signed-out install.
+        let resolved = apps.resolve_start_url("station-manifest://100", &app_id, &app.config_data);
+        assert_eq!(
+            resolved.as_deref(),
+            Some("https://.atlassian.net/login"),
+            "clear did not revert to the plain template"
+        );
     }
 }

@@ -1,15 +1,20 @@
 //! Station manifest registry: typed [`BxAppManifest`] model (port of
 //! `packages/app/src/applications/manifest-provider/bxAppManifest.d.ts`),
-//! the bundled definitions from `packages/app/manifests/definitions`
-//! (TS loads them via webpack `require.context`; here they are embedded at
-//! compile time with `include_dir!`), and the
+//! the bundled definitions, copied from `packages/app/manifests/definitions`
+//! into `rust/assets/definitions` (TS loads the originals via webpack
+//! `require.context`; here the copy is embedded at compile time with
+//! `include_dir!`, so the Rust build does not read inside `packages/`), and the
 //! `manifestToMinimalApplication` projection from `packages/app/manifests/index.ts`.
 //!
-//! Not ported in this slice: icons (TS injects them as webpack url-loader
-//! data URLs; no icon embedding here; private manifests keep their icon
-//! URL — that part of `private.ts` has no webpack dependency).
+//! Icons: the TS build injects each bundled icon as a webpack url-loader *data* URL
+//! (`require.context('!url-loader!./icons')` over `packages/app/manifests/icons`). There is no
+//! webpack here, so a bundled `Manifest.icon` carries the manifest's own remote icon URL
+//! (`icons[0].src`, a `https://cdn.filestackcontent.com/…` address) and the shell fetches and
+//! caches it (`station-shell::icons`); private manifests already carry theirs the same way. An
+//! app with no icon keeps an empty `icon` and draws its letter avatar.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 pub mod config_rules;
 
@@ -177,15 +182,18 @@ pub enum Preset {
     OnPremise,
 }
 
-/// The bundled application definitions (`packages/app/manifests/definitions`).
-static DEFINITIONS: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/../../../packages/app/manifests/definitions");
+/// The bundled application definitions, copied byte-for-byte from
+/// `packages/app/manifests/definitions` into `rust/assets/definitions` so the Rust build no longer
+/// reads inside `packages/`. The original stays until the TS tree is deleted; the drift test
+/// below fails if the two diverge.
+static DEFINITIONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../assets/definitions");
 
 /// A manifest with its registry id and resolved icon URL attached
 /// (TS `Manifest = Omit<BxAppManifest, 'icons'> & { id, icon }`).
 ///
-/// The icon stays an empty string in this slice: TS fills it with webpack
-/// url-loader data URLs, which have no Rust-side equivalent yet.
+/// TS's `icon` is a webpack url-loader *data* URL for a bundled icon file; the port keeps the
+/// manifest's own remote icon URL (`icons[0].src`) instead and lets the shell fetch it. Empty
+/// when the manifest lists no icon (the shell then draws the letter avatar).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     #[serde(flatten)]
@@ -246,10 +254,15 @@ pub fn get_all_application_ids() -> Vec<String> {
 pub fn get_application_by_id(id: &str) -> Option<Manifest> {
     let file = DEFINITIONS.get_file(format!("{id}.json"))?;
     let inner: BxAppManifest = serde_json::from_str(file.contents_utf8()?).ok()?;
+    let icon = inner
+        .icons
+        .first()
+        .map(|resource| resource.src.clone())
+        .unwrap_or_default();
     Some(Manifest {
         inner,
         id: id.to_owned(),
-        icon: String::new(),
+        icon,
     })
 }
 
@@ -271,11 +284,9 @@ pub fn manifest_to_minimal_application(manifest: &Manifest) -> MinimalApplicatio
 ///
 /// Private manifests come last (TS appends them after the bundled ids).
 pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
-    let mut out: Vec<Manifest> = get_all_application_ids()
-        .into_iter()
-        .filter_map(|id| get_application_by_id(&id))
-        .filter(|m| m.inner.do_not_list != Some(true))
-        .collect();
+    // The bundled definitions are static; parse them once instead of once
+    // per search call (the TS module parses them a single time at import).
+    let mut out = bundled_applications().to_vec();
     out.reserve(private.len());
     for m in private {
         if m.inner.do_not_list != Some(true) {
@@ -283,6 +294,18 @@ pub fn list_all_applications(private: &[Manifest]) -> Vec<Manifest> {
         }
     }
     out
+}
+
+/// Bundled, non-`doNotList` manifests, parsed once per process.
+fn bundled_applications() -> &'static [Manifest] {
+    static BUNDLED: LazyLock<Vec<Manifest>> = LazyLock::new(|| {
+        get_all_application_ids()
+            .into_iter()
+            .filter_map(|id| get_application_by_id(&id))
+            .filter(|m| m.inner.do_not_list != Some(true))
+            .collect()
+    });
+    &BUNDLED
 }
 
 /// How well `haystack` matches the lowercased `query` word-by-word.
@@ -300,9 +323,10 @@ enum WordHit {
 
 fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
     let mut best = WordHit::Prefix;
+    let haystack_words = haystack_lower.split(|c: char| !c.is_alphanumeric());
     for q in words {
         let mut word_best = WordHit::None;
-        for w in haystack_lower.split(|c: char| !c.is_alphanumeric()) {
+        for w in haystack_words.clone() {
             if w.starts_with(q) {
                 word_best = WordHit::Prefix;
             } else if w.contains(q) {
@@ -310,6 +334,9 @@ fn word_hit(haystack_lower: &str, words: &[&str]) -> WordHit {
             }
         }
         best = best.min(word_best);
+        if best == WordHit::None {
+            break;
+        }
     }
     best
 }
@@ -329,34 +356,55 @@ const NO_WORD_HIT_SCORE: i64 = -1;
 /// 3. nucleo fuzzy score (descending),
 ///    then name, then id, for determinism.
 pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
-    let apps = list_all_applications(private);
+    let query = query.trim();
     // Empty pattern: Fuse.search('') returns no results; match that.
-    if query.trim().is_empty() {
+    if query.is_empty() {
         return Vec::new();
     }
 
-    let query_lower = query.trim().to_lowercase();
+    fn search_entry(app: &Manifest) -> (&Manifest, String) {
+        (
+            app,
+            app.inner.name.as_deref().unwrap_or_default().to_lowercase(),
+        )
+    }
+    static BUNDLED_NAMES: LazyLock<Vec<(&Manifest, String)>> =
+        LazyLock::new(|| bundled_applications().iter().map(search_entry).collect());
+    let private: Vec<_> = private
+        .iter()
+        .filter(|app| app.inner.do_not_list != Some(true))
+        .map(search_entry)
+        .collect();
+    let apps = BUNDLED_NAMES.iter().chain(&private);
+    let query_lower = query.to_lowercase();
+
+    // An exact name wins over every other hit. Keep bundled names first and
+    // preserve manifest order when more than one name matches.
+    if let Some((app, _)) = apps.clone().find(|(_, name)| *name == query_lower) {
+        return vec![manifest_to_minimal_application(app)];
+    }
+
     let words: Vec<&str> = query_lower.split_whitespace().collect();
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
 
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut hits: Vec<(WordHit, i64, MinimalApplication)> = Vec::new();
+    let mut hits = Vec::new();
     let mut buf = Vec::new();
-    for app in &apps {
-        let name = app.inner.name.clone().unwrap_or_default();
-        // Exact match (whole name equals the query, like Fuse's
-        // `exactMatch` bonus): always wins.
-        if name.to_lowercase() == query_lower {
-            return vec![manifest_to_minimal_application(app)];
-        }
-
-        let hit = word_hit(&name.to_lowercase(), &words);
+    for &(app, ref name_lower) in apps {
+        let name = app.inner.name.as_deref().unwrap_or_default();
+        let hit = word_hit(name_lower, &words);
 
         if let WordHit::None = hit {
             // Allow one typo per query word (Fuse bitap distance <= 1 at
             // threshold 0.4 finds "gmial" → "Gmail"): retry each word
             // against each name word with edit distance 1.
             if !words.iter().all(|q| {
-                name.to_lowercase()
+                name_lower
                     .split(|c: char| !c.is_alphanumeric())
                     .any(|w| within_one_edit(q, w))
             }) {
@@ -365,24 +413,21 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
         }
 
         buf.clear();
-        let score = Pattern::new(
-            &query_lower,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        )
-        .score(nucleo_matcher::Utf32Str::new(&name, &mut buf), &mut matcher)
-        .map(|s| s as i64)
-        .unwrap_or(NO_WORD_HIT_SCORE);
-        hits.push((hit, score, manifest_to_minimal_application(app)));
+        let score = pattern
+            .score(nucleo_matcher::Utf32Str::new(name, &mut buf), &mut matcher)
+            .map(i64::from)
+            .unwrap_or(NO_WORD_HIT_SCORE);
+        hits.push((hit, score, name, app));
     }
     hits.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(b.1.cmp(&a.1))
-            .then_with(|| a.2.name.cmp(&b.2.name))
-            .then_with(|| a.2.id.cmp(&b.2.id))
+            .then_with(|| a.2.cmp(b.2))
+            .then_with(|| a.3.id.cmp(&b.3.id))
     });
-    hits.into_iter().map(|(_, _, m)| m).collect()
+    hits.into_iter()
+        .map(|(_, _, _, app)| manifest_to_minimal_application(app))
+        .collect()
 }
 
 /// True when `a` and `b` are within one character edit (insert, delete,
@@ -390,42 +435,21 @@ pub fn search(query: &str, private: &[Manifest]) -> Vec<MinimalApplication> {
 /// transpositions as two edits but still ranks them at threshold 0.4 for
 /// short queries like "gmial" → "gmail") of each other.
 fn within_one_edit(a: &str, b: &str) -> bool {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    match a.len().cmp(&b.len()) {
-        std::cmp::Ordering::Equal => {
-            let diffs = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-            diffs <= 1 || (diffs == 2 && one_transposition(&a, &b))
-        }
-        std::cmp::Ordering::Less => one_insertion(&a, &b),
-        std::cmp::Ordering::Greater => one_insertion(&b, &a),
-    }
-}
-
-/// Equal-length strings differing only by one adjacent swap?
-fn one_transposition(a: &[char], b: &[char]) -> bool {
-    let first = a.iter().zip(b).position(|(x, y)| x != y);
-    let Some(i) = first else { return true };
-    i + 1 < a.len() && a[i] == b[i + 1] && a[i + 1] == b[i] && a[i + 2..] == b[i + 2..]
-}
-
-/// `short` plus exactly one inserted character equals `long`?
-fn one_insertion(short: &[char], long: &[char]) -> bool {
-    if long.len() != short.len() + 1 {
-        return false;
-    }
-    // Walk both; at most one char of `long` may be skipped.
-    let (mut i, mut skipped) = (0, false);
-    for c in long {
-        if i < short.len() && short[i] == *c {
-            i += 1;
-        } else if !skipped {
-            skipped = true;
-        } else {
-            return false;
+    let (mut a, mut b) = (a.chars(), b.chars());
+    loop {
+        let (a_tail, b_tail) = (a.as_str(), b.as_str());
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => continue,
+            (Some(x), Some(y)) => {
+                return a.as_str() == b.as_str() // substitution
+                    || a.as_str() == b_tail || b.as_str() == a_tail // insertion or deletion
+                    || (a.next() == Some(y) && b.next() == Some(x) && a.as_str() == b.as_str());
+            }
+            (None, Some(_)) => return b.as_str().is_empty(),
+            (Some(_), None) => return a.as_str().is_empty(),
         }
     }
-    true
 }
 
 /// Search with a private-manifest store (port of the TS pairing of
@@ -464,12 +488,21 @@ const PRIVATE_ID_BASE: u64 = 1_000_000;
 /// User-added "private" application manifests persisted as JSON in the
 /// user config dir (port of `manifests/private.ts`).
 ///
+/// The largest `private-manifests.json` this crate reads (8 MiB). Past it the file is treated
+/// like a corrupt one: warned about and ignored, so a hostile file cannot cost memory.
+pub const MAX_PRIVATE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The most records a private-manifest store holds (read or written).
+pub const MAX_PRIVATE_MANIFESTS: usize = 10_000;
+
 /// The TS module hardwires the path to Electron's `userData` dir and a
 /// 1-second memoization cache; the port takes the directory from the
 /// caller ([`PrivateStore::new`] uses `dirs::config_dir`) and always
 /// reads from memory, which the 1s cache only ever approximated.
 pub struct PrivateStore {
-    path: PathBuf,
+    /// `None` for an in-memory store: nothing is written, so a machine with no writable config
+    /// dir can still run the shell (its custom apps live for the session only).
+    path: Option<PathBuf>,
     data: Vec<PrivateManifestRecord>,
     highest_id: u64,
 }
@@ -491,33 +524,64 @@ impl PrivateStore {
         let mut data: Vec<PrivateManifestRecord> = Vec::new();
         let mut highest_id = PRIVATE_ID_BASE;
         if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => match serde_json::from_str::<PrivateFile>(&text) {
-                    Ok(file) => {
-                        for r in file.data {
-                            highest_id = highest_id.max(r.id);
-                            data.push(r);
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.len() > MAX_PRIVATE_MANIFEST_BYTES => {
+                    eprintln!(
+                        "private-manifests.json is {} bytes; starting empty (at most {} is read)",
+                        metadata.len(),
+                        MAX_PRIVATE_MANIFEST_BYTES
+                    );
+                }
+                Ok(_) => match std::fs::read_to_string(&path) {
+                    Ok(text) => match serde_json::from_str::<PrivateFile>(&text) {
+                        Ok(file) if file.data.len() > MAX_PRIVATE_MANIFESTS => {
+                            eprintln!(
+                                "private-manifests.json has {} records; starting empty (at most {} is kept)",
+                                file.data.len(),
+                                MAX_PRIVATE_MANIFESTS
+                            );
                         }
-                    }
-                    Err(e) => {
-                        // TS console.warn's and carries on with [].
-                        eprintln!("private-manifests.json unreadable: {e}");
-                    }
+                        Ok(file) => {
+                            for r in file.data {
+                                highest_id = highest_id.max(r.id);
+                                data.push(r);
+                            }
+                        }
+                        Err(e) => {
+                            // TS console.warn's and carries on with [].
+                            eprintln!("private-manifests.json unreadable: {e}");
+                        }
+                    },
+                    Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
                 },
                 Err(e) => eprintln!("private-manifests.json unreadable: {e}"),
             }
         }
         Ok(Self {
-            path,
+            path: Some(path),
             data,
             highest_id,
         })
     }
 
-    /// Port of `saveNewApplication`: assigns the next id, persists, and
-    /// returns the new id.
-    pub fn save_new_application(&mut self, payload: NewPrivateApplication) -> u64 {
-        self.highest_id += 1;
+    /// A store that never touches the disk: reads nothing, and writes are accepted and forgotten.
+    /// The shell falls back to it when the user's config dir cannot be opened.
+    pub fn in_memory() -> Self {
+        Self {
+            path: None,
+            data: Vec::new(),
+            highest_id: PRIVATE_ID_BASE,
+        }
+    }
+
+    /// Port of `saveNewApplication`: assigns the next id, persists, and returns the new id.
+    ///
+    /// A write failure is returned instead of panicking, and the in-memory list is rolled back:
+    /// what the caller sees stays what the disk holds.
+    pub fn save_new_application(&mut self, payload: NewPrivateApplication) -> std::io::Result<u64> {
+        // TS numbers are floats and cannot overflow; saturate so a hostile
+        // `u64::MAX` id loaded from the file cannot panic on `+ 1`.
+        let id = self.highest_id.saturating_add(1);
         let manifest = PrivateManifestRecord {
             name: payload.name,
             scope: payload.scope,
@@ -529,17 +593,29 @@ impl PrivateStore {
             start_url: payload.start_url,
             category: "Miscellaneous".to_owned(),
             theme_color: payload.theme_color,
-            id: self.highest_id,
+            id,
         };
         self.data.push(manifest);
-        self.persist().expect("write private-manifests.json");
-        self.highest_id
+        if let Err(error) = self.persist() {
+            self.data.pop();
+            return Err(error);
+        }
+        self.highest_id = id;
+        Ok(id)
     }
 
-    /// Port of `deleteManifest` (unknown id is a no-op, like TS).
-    pub fn delete_manifest(&mut self, id: u64) {
-        self.data.retain(|r| r.id != id);
-        self.persist().expect("write private-manifests.json");
+    /// Port of `deleteManifest` (unknown id is a no-op, like TS). A write failure is returned and
+    /// the record is put back.
+    pub fn delete_manifest(&mut self, id: u64) -> std::io::Result<()> {
+        let Some(index) = self.data.iter().position(|record| record.id == id) else {
+            return Ok(());
+        };
+        let removed = self.data.remove(index);
+        if let Err(error) = self.persist() {
+            self.data.insert(index, removed);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Port of `getPrivateManifests` (TS `cleanIcon`: first icon src as
@@ -570,10 +646,51 @@ impl PrivateStore {
             .find(|m| m.id == id.to_string())
     }
 
+    /// Writes through a sibling temp file, fsyncs it, then renames it over the store: a failed or
+    /// killed write leaves the previous file in place, and a failed one removes its temp file.
+    /// (The same pattern `session-store` uses; one small helper each keeps the crates independent.)
     fn persist(&self) -> std::io::Result<()> {
+        let Some(path) = &self.path else {
+            // In memory: accepted and forgotten.
+            return Ok(());
+        };
         let json = serde_json::to_string(&PrivateFileRef { data: &self.data })?;
-        std::fs::write(&self.path, json)
+        write_atomically(path, json.as_bytes())
     }
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private manifest path has no file name",
+        )
+    })?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = directory.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// The `{ "data": [...] }` envelope `private.ts` writes.
@@ -605,28 +722,51 @@ fn dirs_config_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// One definition file on disk == one parseable embedded manifest.
+    /// The embedded definitions are the copied asset input: 638 JSON files, every one parseable,
+    /// byte-identical to the embedded bytes. That makes the copy the build input (not a name
+    /// coincidence) and fails if either side drifts.
     #[test]
     fn embedded_definitions_match_files_on_disk() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../packages/app/manifests/definitions");
-        let on_disk = std::fs::read_dir(&dir)
-            .unwrap()
+        const EXPECTED_DEFINITIONS: usize = 638;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/definitions");
+        let mut on_disk = 0;
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|why| panic!("{} unreadable: {why}", dir.display()))
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count();
+        {
+            let path = entry.path();
+            if !path.extension().is_some_and(|x| x == "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|why| panic!("{} unreadable: {why}", path.display()));
+            serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap_or_else(|why| panic!("{} is not JSON: {why}", path.display()));
+            on_disk += 1;
+        }
+        assert_eq!(
+            on_disk,
+            EXPECTED_DEFINITIONS,
+            "copied definitions count drifted: {}",
+            dir.display()
+        );
 
         let ids = get_all_application_ids();
         assert_eq!(ids.len(), on_disk, "embedded count != JSON file count");
 
-        let mut parsed = 0;
         for id in &ids {
             let m =
                 get_application_by_id(id).unwrap_or_else(|| panic!("failed to parse {id}.json"));
             assert_eq!(&m.id, id);
-            parsed += 1;
+            let name = format!("{id}.json");
+            let embedded = DEFINITIONS.get_file(name.as_str()).expect("embedded file");
+            let disk = std::fs::read(dir.join(&name)).expect("copied file");
+            assert_eq!(
+                embedded.contents(),
+                disk.as_slice(),
+                "{name} differs between the embedded copy and rust/assets/definitions"
+            );
         }
-        assert_eq!(parsed, on_disk);
     }
 
     /// Every manifest survives a serde JSON round-trip unchanged.
@@ -658,6 +798,28 @@ mod tests {
             get_chrome_extension_id(&mixmax.inner),
             Some("ocpljaamllnldhepankaeljmeeeghnid")
         );
+    }
+
+    /// A bundled manifest's icon is its first icon resource's URL (the TS build embeds the
+    /// same source as a data URL; here it stays remote for the shell to fetch and cache).
+    #[test]
+    fn bundled_manifests_carry_their_icon_url() {
+        let gmail = get_application_by_id("14").unwrap();
+        assert_eq!(
+            gmail.icon,
+            "https://cdn.filestackcontent.com/Yxw83DJdRW2N2PkcDFGA"
+        );
+        let minimal = manifest_to_minimal_application(&gmail);
+        assert_eq!(minimal.icon_url, gmail.icon);
+    }
+
+    /// A manifest without an icon list keeps an empty icon: the shell's letter avatar is the
+    /// fallback, not an error.
+    #[test]
+    fn a_manifest_without_icons_has_an_empty_icon() {
+        let m = get_application_by_id("1").unwrap(); // the App Store itself
+        assert!(m.icon.is_empty(), "1.json declares no icons");
+        assert!(manifest_to_minimal_application(&m).icon_url.is_empty());
     }
 
     #[test]

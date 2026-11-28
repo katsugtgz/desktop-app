@@ -5,7 +5,9 @@
 //! - the distant API schema is embedded verbatim at
 //!   [`SCHEMA_GRAPHQL`](static@SCHEMA_GRAPHQL) (byte-for-byte copy of
 //!   `packages/appstore/api-schema.graphqls`, also published next to this crate
-//!   as `schema/api.graphqls`), and
+//!   as `schema/api.graphqls`); the parity test compares it against
+//!   `rust/assets/api-schema.graphqls`, a copy kept so the test does not read
+//!   inside `packages/` (the original is deleted with the TS tree), and
 //! - the serde structs below carry the fields the appstore UI actually reads
 //!   (the `applications`, `boostedApplications` and `search` query shapes),
 //!   replacing the Apollo `InMemoryCache` + client-schema local-state layer.
@@ -16,7 +18,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Verbatim copy of `packages/appstore/api-schema.graphqls`.
+/// Verbatim copy of `packages/appstore/api-schema.graphqls`; the parity anchor is copied to
+/// `rust/assets/api-schema.graphqls` so `cargo test` no longer reads inside `packages/`.
 pub static SCHEMA_GRAPHQL: &str = include_str!("../schema/api.graphqls");
 
 /// `type ApplicationCategory` from the API schema, as selected by
@@ -299,12 +302,15 @@ mod tests {
     #[test]
     fn schema_graphql_matches_api_schema_verbatim() {
         // Same check the slice verification runs outside: `diff` must be
-        // empty. Done in Rust so `cargo test` alone proves it.
+        // empty. Done in Rust so `cargo test` alone proves it. The source
+        // read is the copied asset (`rust/assets/api-schema.graphqls`), not
+        // `packages/appstore/api-schema.graphqls`, so the test survives the
+        // TS tree's deletion.
         let source = fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../packages/appstore/api-schema.graphqls"
+            "/../../assets/api-schema.graphqls"
         ))
-        .expect("packages/appstore/api-schema.graphqls readable");
+        .expect("rust/assets/api-schema.graphqls readable");
         assert_eq!(SCHEMA_GRAPHQL, source);
     }
 

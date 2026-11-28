@@ -4,13 +4,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust.yml"
   pull_request:
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust.yml"
 
 defaults:
   run:
@@ -21,6 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -33,6 +32,29 @@ jobs:
 
       - name: Format
         run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - name: Build
         run: cargo build --workspace --all-targets

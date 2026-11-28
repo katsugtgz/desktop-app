@@ -1,8 +1,0 @@
-  query GetMinimizeToTrayStatus @live @local {
-    minimizeToTray
-  }
-
-  mutation EnableMinimizeToTray($enabled: Boolean!) @local{
-    setMinimizeToTray(enabled: $enabled)
-  }
-  

@@ -1,7 +1,0 @@
-  query GetPromptDownloadStatus @live @local {
-    promptDownloadEnabled
-  }
-
-  mutation EnablePromptDownload($enabled: Boolean!) @local{
-    setPromptDownload(enabled: $enabled)
-  }

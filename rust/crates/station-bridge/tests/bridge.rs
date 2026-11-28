@@ -11,7 +11,7 @@
 use serde_json::{json, Value};
 
 fn scratch(tag: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("station-w01-bridge-{tag}"));
+    let dir = std::env::temp_dir().join(format!("station-w01-bridge-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("private-manifests.json")

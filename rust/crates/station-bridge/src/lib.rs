@@ -3,9 +3,9 @@
 //!
 //! Only the methods with EXISTS backends are exported (search, most popular,
 //! categories, by-category, manifest-by-url, private apps, install,
-//! uninstall, request-private). The `planned` backends (uninstallByManifest,
-//! setConfigData, theme/identities watchers, notification passthrough) land
-//! with their own slices.
+//! uninstall, uninstall-by-manifest, request-private). The remaining
+//! `planned` backends (setConfigData, theme/identities watchers,
+//! notification passthrough) land with their own slices.
 //!
 //! Envelope semantics copied from
 //! `packages/app/src/services/services/sdkv2/worker.ts` `callAction`: a
@@ -33,6 +33,7 @@ use napi_derive::napi;
 use serde_json::{json, Map, Value};
 
 mod watchers;
+#[cfg_attr(test, allow(dead_code))]
 mod watchers_napi;
 
 /// Process-global service state, initialized on first use.
@@ -229,6 +230,22 @@ pub fn uninstall_application(application_id: String) -> Result<Value> {
     })
 }
 
+/// `bxApi.applications.uninstallByManifest(manifestURL)` — the
+/// `UninstallApplications` channel (`abstract-application/sagas.ts`
+/// `uninstallAllInstances`): every instance of the manifest goes, the
+/// private manifest goes with its last instance above the 1000000
+/// sentinel. Action-shaped dispatch, resolves `undefined` — modeled as
+/// `null` like the other action channels.
+#[napi(js_name = "uninstallApplicationsByManifest")]
+pub fn uninstall_applications_by_manifest(manifest_url: String) -> Result<Value> {
+    with_service(|service| {
+        service
+            .uninstall_all_for_manifest(&manifest_url)
+            .map_err(app_err)?;
+        Ok(Value::Null)
+    })
+}
+
 /// `bxApi.applications.requestPrivate(recipe)` — the
 /// `RequestPrivateApplication` channel; the recipe carries the bxApi field
 /// names (`name`, `themeColor`, `bxIconURL`, `startURL`, `scope`, all
@@ -252,7 +269,11 @@ pub fn request_private_application(recipe: Value) -> Result<Value> {
         scope: field("scope")?,
     };
     with_service(|service| {
-        let created = service.request_private_application(new_private);
+        // The store write can fail (read-only or full disk): the bridge reports it as the same
+        // generic failure every other appstore error uses.
+        let created = service
+            .request_private_application(new_private)
+            .map_err(app_err)?;
         Ok(json!({
             "body": {
                 "id": created.id,
@@ -268,8 +289,7 @@ pub fn request_private_application(recipe: Value) -> Result<Value> {
 pub use appstore_service::InstalledApplication;
 
 /// Read-only snapshot of installed applications (napi-exposed shape for the
-/// later `setConfigData` / `uninstallByManifest` slices; kept internal to
-/// this slice's surface).
+/// later `setConfigData` slice; kept internal to this slice's surface).
 pub fn installed_snapshot() -> HashMap<String, InstalledApplication> {
     with_service(|service| Ok(service.installed_applications().clone())).unwrap_or_default()
 }

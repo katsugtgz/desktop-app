@@ -1,5 +1,0 @@
-query allApplicationCategories {
-    allApplicationCategories {
-        name
-    }
-}

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# Rune's patched dependencies, copied from its `vendor/` at the pinned rev (see
+# `[patch.crates-io]` below). They are crates of their own, not workspace members.
+exclude = ["vendor/accesskit_macos", "vendor/accesskit_windows", "vendor/parley_engine", "vendor/wgpu-hal", "vendor/winit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,3 +13,18 @@ edition = "2021"
 tokio = "1.53"
 serde = "1.0"
 serde_json = "1.0"
+
+# Rune (git rev 10a39584) is built against patched copies of five published crates: `parley_engine`
+# gains its `line-dictionaries` feature, `wgpu-hal` gains `dx12::Instance::expose_adapter` and
+# `Surface::set_present_rects`, `winit` gains `platform::windows::warm_keyboard_layout` and macOS IME
+# text hooks, and both `accesskit` adapters gain heading/landmark roles. A dependency's `[patch]`
+# does not apply to the workspace that depends on it, so Rune's own note — "apps that build Rune
+# patch it too" — makes these mandatory here. The copies are verbatim from Rune's `vendor/` at
+# 10a39584cc1ff739477be52e333a742a024ac956; the `.patch` files beside them are the deltas
+# (re-make with Rune's `scripts/vendor-*.sh <version>` when Rune is bumped).
+[patch.crates-io]
+accesskit_macos = { path = "vendor/accesskit_macos" }
+accesskit_windows = { path = "vendor/accesskit_windows" }
+parley_engine = { path = "vendor/parley_engine" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
+winit = { path = "vendor/winit" }

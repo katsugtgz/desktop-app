@@ -24,7 +24,8 @@ pub use app_request::{
 };
 pub use write_commands::{
     ApplicationCreated, ApplicationError, ApplicationInstalledPayload, ApplicationService,
-    InstallApplicationReturn, InstallContext, InstallOptions, InstalledApplication,
+    InstallApplicationReturn, InstallContext, InstallOptions, InstalledApplication, RestoreError,
+    TabRecord,
 };
 
 use manifest_registry::{Manifest, MinimalApplication};
